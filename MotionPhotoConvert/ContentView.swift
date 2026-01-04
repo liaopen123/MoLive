@@ -67,6 +67,13 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("照片转换器")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: BatchConversionView()) {
+                        Label("批量转换", systemImage: "square.stack.3d.up")
+                    }
+                }
+            }
             .alert("提示", isPresented: $showingAlert) {
                 Button("确定", role: .cancel) { }
             } message: {

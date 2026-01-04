@@ -18,4 +18,13 @@ class LiveToMotionJPEGConverter {
         // 转换 Live Photo 到 Motion JPEG
         return try await Converter.shared.convertLivePhotoToMotionJPEG(from: livePhoto)
     }
+    
+    // 从 PHAsset 直接转换
+    func convert(from asset: PHAsset) async throws -> URL {
+        // 使用 LivePhotoFetcher 加载 Live Photo
+        let livePhoto = try await LivePhotoFetcher.shared.loadLivePhoto(from: asset)
+        
+        // 转换 Live Photo 到 Motion JPEG
+        return try await Converter.shared.convertLivePhotoToMotionJPEG(from: livePhoto)
+    }
 } 

@@ -11,6 +11,11 @@ import SwiftUI
 struct MotionJPEGConvertApp: App {
     @StateObject private var permissionManager = PermissionManager()
     
+    init() {
+        // 初始化 CoreData 栈
+        _ = ConversionRecordManager.shared.persistentContainer
+    }
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
