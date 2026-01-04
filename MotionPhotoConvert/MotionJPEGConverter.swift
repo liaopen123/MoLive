@@ -222,6 +222,15 @@ extension Converter {
               let metadata = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
             throw ConversionError.conversionFailed
         }
+        
+        // 提取方向信息
+        var orientation: Int = 1 // 默认正常方向
+        if let tiffDict = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
+           let orientationValue = tiffDict[kCGImagePropertyTIFFOrientation as String] as? Int {
+            orientation = orientationValue
+        } else if let orientationValue = metadata[kCGImagePropertyOrientation as String] as? Int {
+            orientation = orientationValue
+        }
 
         // 创建目标图像
         guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL,
@@ -277,10 +286,23 @@ extension Converter {
         ])
         
         // IFD0
-        let exifIFDOffset: UInt32 = UInt32(8 + 2 + 12 + 4) // TIFF头部(8) + 条目数量(2) + ExifIFD指针条目(12) + 下一个IFD指针(4)
+        // 计算偏移量：需要包含 Orientation 条目（12字节）和 ExifIFD 指针条目（12字节）
+        let orientationOffset: UInt32 = 8 + 2 + 12 // TIFF头部(8) + 条目数量(2) + Orientation条目(12)
+        let exifIFDOffset: UInt32 = orientationOffset + 12 + 4 // Orientation条目后 + ExifIFD指针条目(12) + 下一个IFD指针(4)
         
-        // IFD0 条目数量
-        exifData.append(contentsOf: [0x00, 0x01])
+        // IFD0 条目数量（Orientation + ExifIFD指针）
+        exifData.append(contentsOf: [0x00, 0x02])
+        
+        // Orientation 条目 (Tag 0x0112)
+        exifData.append(contentsOf: [0x01, 0x12]) // Tag: Orientation
+        exifData.append(contentsOf: [0x00, 0x03]) // Type: SHORT
+        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
+        let orientationValue = UInt16(orientation)
+        exifData.append(contentsOf: [
+            UInt8(orientationValue >> 8),
+            UInt8(orientationValue & 0xFF),
+            0x00, 0x00 // 填充到4字节
+        ])
         
         // ExifIFD 指针条目
         exifData.append(contentsOf: [0x87, 0x69]) // Tag 34665
