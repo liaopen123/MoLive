@@ -27,16 +27,10 @@ class BatchConverter {
         }
     }
     
-    // 自动计算并发数
-    private var maxConcurrency: Int {
-        let processorCount = ProcessInfo.processInfo.processorCount
-        return min(processorCount, 3) // 最多3个并发
-    }
-    
-    // 批量转换
+    // 批量转换（顺序执行，一个接一个）
     func convertBatch(
         assets: [PHAsset],
-        progressHandler: @escaping (Int, Int, Error?) -> Void
+        progressHandler: @escaping (Int, Int, Int, PHAsset?, Error?) -> Void
     ) async {
         let recordManager = ConversionRecordManager.shared
         let albumManager = AlbumManager.shared
@@ -54,9 +48,12 @@ class BatchConverter {
         var convertedCount = 0
         var failedCount = 0
         
+        // 通知总数
+        progressHandler(0, 0, totalCount, nil, nil)
+        
         // 获取或创建相册
         guard let album = try? await albumManager.getOrCreateAlbum() else {
-            progressHandler(0, totalCount, NSError(
+            progressHandler(0, 0, totalCount, nil, NSError(
                 domain: "BatchConverterError",
                 code: 1001,
                 userInfo: [NSLocalizedDescriptionKey: "无法创建或获取相册"]
@@ -64,60 +61,31 @@ class BatchConverter {
             return
         }
         
-        // 使用 TaskGroup 进行并发控制
-        await withTaskGroup(of: (Bool, Error?).self) { group in
-            var activeTasks = 0
-            var assetIndex = 0
-            
-            // 启动初始批次的任务
-            while assetIndex < assetsToConvert.count && activeTasks < maxConcurrency {
-                let asset = assetsToConvert[assetIndex]
-                assetIndex += 1
-                activeTasks += 1
-                
-                group.addTask {
-                    await self.convertSingleAsset(
-                        asset: asset,
-                        converter: converter,
-                        albumManager: albumManager,
-                        album: album,
-                        recordManager: recordManager
-                    )
-                }
+        // 顺序转换，一个接一个
+        for asset in assetsToConvert {
+            // 检查是否暂停
+            while await pauseState.checkPaused() {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 等待 0.1 秒
             }
             
-            // 处理完成的任务并启动新任务
-            while activeTasks > 0 {
-                let result = await group.next()
-                activeTasks -= 1
-                
-                if let (success, error) = result {
-                    if success {
-                        convertedCount += 1
-                    } else {
-                        failedCount += 1
-                    }
-                    
-                    // 更新进度
-                    progressHandler(convertedCount, failedCount, error)
-                    
-                    // 如果还有待处理的 asset，启动新任务
-                    if assetIndex < assetsToConvert.count {
-                        let asset = assetsToConvert[assetIndex]
-                        assetIndex += 1
-                        activeTasks += 1
-                        
-                        group.addTask {
-                            await self.convertSingleAsset(
-                                asset: asset,
-                                converter: converter,
-                                albumManager: albumManager,
-                                album: album,
-                                recordManager: recordManager
-                            )
-                        }
-                    }
-                }
+            // 转换单个 asset
+            let result = await convertSingleAsset(
+                asset: asset,
+                converter: converter,
+                albumManager: albumManager,
+                album: album,
+                recordManager: recordManager
+            )
+            
+            // 更新统计
+            if result.0 {
+                convertedCount += 1
+                // 更新进度（成功时传递 nil asset）
+                progressHandler(convertedCount, failedCount, totalCount, nil, nil)
+            } else {
+                failedCount += 1
+                // 更新进度（失败时传递失败的 asset）
+                progressHandler(convertedCount, failedCount, totalCount, asset, result.1)
             }
         }
     }

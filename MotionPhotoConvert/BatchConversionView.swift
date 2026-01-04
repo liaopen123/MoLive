@@ -122,10 +122,10 @@ struct BatchConversionView: View {
                 }
             } else {
                 VStack(spacing: 8) {
-                    StatisticRow(label: "总 Live Photo 数", value: "\(totalLivePhotos)")
+                    StatisticRow(label: "待转换总数", value: "\(totalLivePhotos)")
                     StatisticRow(label: "已转换", value: "\(conversionState.convertedCount)", color: .green)
                     StatisticRow(label: "失败", value: "\(conversionState.failedCount)", color: .red)
-                    StatisticRow(label: "待转换", value: "\(conversionState.pendingCount)", color: .orange)
+                    StatisticRow(label: "剩余", value: "\(conversionState.pendingCount)", color: .orange)
                 }
             }
         }
@@ -193,6 +193,16 @@ struct BatchConversionView: View {
                 .disabled(totalLivePhotos == 0 || isLoadingCount)
             }
             
+            // 重试失败的文件
+            if !conversionState.isConverting && conversionState.hasFailedAssets {
+                Button(action: retryFailedConversion) {
+                    Label("重试失败的文件 (\(conversionState.failedAssets.count))", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
+            
             if conversionState.convertedCount > 0 || conversionState.failedCount > 0 {
                 Button(action: resetConversion) {
                     Text("重置")
@@ -216,7 +226,7 @@ struct BatchConversionView: View {
         permissionManager.photoLibraryPermissionStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     }
     
-    // 加载 Live Photo 数量
+    // 加载 Live Photo 数量（排除已转换的）
     private func loadLivePhotoCount() {
         guard permissionManager.photoLibraryPermissionStatus == .authorized else {
             return
@@ -224,9 +234,19 @@ struct BatchConversionView: View {
         
         isLoadingCount = true
         Task {
-            let count = await LivePhotoFetcher.shared.fetchLivePhotoCount(since: conversionState.selectedDate)
+            // 获取所有 Live Photo
+            let allAssets = await LivePhotoFetcher.shared.fetchAllLivePhotos(since: conversionState.selectedDate)
+            
+            // 获取已转换的记录
+            let recordManager = ConversionRecordManager.shared
+            let convertedIdentifiers = recordManager.getAllConvertedIdentifiers()
+            
+            // 过滤掉已转换的
+            let pendingAssets = allAssets.filter { !convertedIdentifiers.contains($0.localIdentifier) }
+            
             await MainActor.run {
-                totalLivePhotos = count
+                // 总数应该是待转换的数量（不包含已转换的）
+                totalLivePhotos = pendingAssets.count
                 isLoadingCount = false
             }
         }
@@ -257,16 +277,24 @@ struct BatchConversionView: View {
             }
             
             // 执行批量转换
-            await BatchConverter.shared.convertBatch(assets: assetsToConvert) { converted, failed, error in
+            await BatchConverter.shared.convertBatch(assets: assetsToConvert) { converted, failed, total, failedAsset, error in
                 Task { @MainActor in
                     if !Task.isCancelled {
-                        conversionState.updateProgress(converted: converted, failed: failed, total: conversionState.totalCount)
+                        // 使用 BatchConverter 返回的 total，确保一致性
+                        conversionState.updateProgress(converted: converted, failed: failed, total: total)
+                        
+                        // 如果有失败的 asset，添加到失败列表
+                        if let failedAsset = failedAsset {
+                            conversionState.addFailedAsset(failedAsset)
+                        }
                     }
                 }
             }
             
             await MainActor.run {
                 conversionState.stop()
+                // 重试完成后，重新加载统计信息（排除已转换的）
+                loadLivePhotoCount()
             }
         }
     }
@@ -293,6 +321,64 @@ struct BatchConversionView: View {
     private func resetConversion() {
         conversionState.reset()
         loadLivePhotoCount()
+    }
+    
+    // 重试失败的文件
+    private func retryFailedConversion() {
+        guard permissionManager.photoLibraryPermissionStatus == .authorized else {
+            showingAlert = true
+            alertMessage = "需要相册访问权限"
+            return
+        }
+        
+        guard !conversionState.failedAssets.isEmpty else {
+            return
+        }
+        
+        // 保存失败的 assets 列表（创建副本）
+        let failedAssets = Array(conversionState.failedAssets)
+        let retryCount = failedAssets.count
+        
+        // 记录重试前的状态
+        let previousConverted = conversionState.convertedCount
+        let previousFailed = conversionState.failedCount
+        
+        // 清空失败列表（重试过程中会重新填充）
+        conversionState.failedAssets.removeAll()
+        conversionState.failedCount = 0
+        
+        // 更新总数（只重试失败的文件）
+        conversionState.totalCount = retryCount
+        conversionState.start()
+        
+        conversionTask = Task {
+            // 执行批量转换（只转换失败的文件）
+            await BatchConverter.shared.convertBatch(assets: failedAssets) { converted, failed, total, failedAsset, error in
+                Task { @MainActor in
+                    if !Task.isCancelled {
+                        // 更新进度
+                        // 已转换数 = 之前的已转换数 + 重试成功的数量
+                        // 失败数 = 重试失败的数量
+                        conversionState.updateProgress(
+                            converted: previousConverted + converted,
+                            failed: failed,
+                            total: conversionState.totalCount
+                        )
+                        
+                        // 如果有失败的 asset，添加到失败列表
+                        if let failedAsset = failedAsset {
+                            conversionState.addFailedAsset(failedAsset)
+                        }
+                    }
+                }
+            }
+            
+            await MainActor.run {
+                conversionState.stop()
+                // 重试完成后，重新加载统计信息（排除已转换的）
+                loadLivePhotoCount()
+            }
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Photos
 
 class BatchConversionState: ObservableObject {
     @Published var isConverting: Bool = false
@@ -11,10 +12,16 @@ class BatchConversionState: ObservableObject {
     @Published var selectedDate: Date?
     @Published var statusMessage: String = "准备就绪"
     @Published var currentProcessingIndex: Int = 0
+    @Published var failedAssets: [PHAsset] = [] // 记录失败的 asset
     
     // 计算待转换数量
     var pendingCount: Int {
         return totalCount - convertedCount - failedCount
+    }
+    
+    // 是否有失败的文件可以重试
+    var hasFailedAssets: Bool {
+        return !failedAssets.isEmpty
     }
     
     // 重置状态
@@ -27,6 +34,19 @@ class BatchConversionState: ObservableObject {
         currentProgress = 0.0
         currentProcessingIndex = 0
         statusMessage = "准备就绪"
+        failedAssets.removeAll()
+    }
+    
+    // 添加失败的 asset
+    func addFailedAsset(_ asset: PHAsset) {
+        if !failedAssets.contains(where: { $0.localIdentifier == asset.localIdentifier }) {
+            failedAssets.append(asset)
+        }
+    }
+    
+    // 移除成功的 asset（重试成功后）
+    func removeFailedAsset(_ asset: PHAsset) {
+        failedAssets.removeAll { $0.localIdentifier == asset.localIdentifier }
     }
     
     // 更新进度
