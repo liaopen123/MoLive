@@ -219,26 +219,41 @@ extension Converter {
         // 创建 CGImageSource 来处理图像和元数据
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
               let imageRef = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),
-              let metadata = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
+              var metadata = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
             throw ConversionError.conversionFailed
         }
         
-        // 提取方向信息
-        var orientation: Int = 1 // 默认正常方向
-        if let tiffDict = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
-           let orientationValue = tiffDict[kCGImagePropertyTIFFOrientation as String] as? Int {
-            orientation = orientationValue
-        } else if let orientationValue = metadata[kCGImagePropertyOrientation as String] as? Int {
-            orientation = orientationValue
+        // 确保 EXIF 字典存在，用于添加 0x8897 标签
+        var exifDict: [String: Any]
+        if let existingExif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+            exifDict = existingExif
+        } else {
+            exifDict = [String: Any]()
         }
+        
+        // 添加 0x8897 标签（Motion Photo 标识）
+        exifDict["8897"] = Data([0x01]) // 0x8897 标签，值为 1
+        
+        // 更新 metadata 中的 EXIF 字典
+        metadata[kCGImagePropertyExifDictionary as String] = exifDict
 
-        // 创建目标图像
+        // 创建目标图像，保留所有原始元数据
         guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL,
                                                               UTType.jpeg.identifier as CFString,
                                                               1, nil) else {
             throw ConversionError.conversionFailed
         }
 
+        // 设置图像和所有原始元数据（包括 EXIF、TIFF、GPS 等）
+        CGImageDestinationAddImage(destination, imageRef, metadata as CFDictionary)
+        
+        guard CGImageDestinationFinalize(destination) else {
+            throw ConversionError.conversionFailed
+        }
+
+        // 读取生成的图像数据
+        var finalData = try Data(contentsOf: outputURL)
+        
         // 创建 XMP 元数据
         let xmpString = """
         <?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
@@ -268,99 +283,40 @@ extension Converter {
         xmpSegment.append(UInt8(xmpSegmentLength & 0xFF))
         xmpSegment.append(xmpIdentifierData)
         xmpSegment.append(xmpData)
-
-        // 创建 EXIF 段
-        var exifData = Data()
         
-        // TIFF 头部
-        exifData.append(contentsOf: [0x4D, 0x4D]) // 大端字节序 (MM)
-        exifData.append(contentsOf: [0x00, 0x2A]) // TIFF 标识符
-        
-        // IFD0 偏移量
-        let ifd0Offset: UInt32 = 8
-        exifData.append(contentsOf: [
-            UInt8(ifd0Offset >> 24),
-            UInt8(ifd0Offset >> 16),
-            UInt8(ifd0Offset >> 8),
-            UInt8(ifd0Offset)
-        ])
-        
-        // IFD0
-        // 计算偏移量：需要包含 Orientation 条目（12字节）和 ExifIFD 指针条目（12字节）
-        let orientationOffset: UInt32 = 8 + 2 + 12 // TIFF头部(8) + 条目数量(2) + Orientation条目(12)
-        let exifIFDOffset: UInt32 = orientationOffset + 12 + 4 // Orientation条目后 + ExifIFD指针条目(12) + 下一个IFD指针(4)
-        
-        // IFD0 条目数量（Orientation + ExifIFD指针）
-        exifData.append(contentsOf: [0x00, 0x02])
-        
-        // Orientation 条目 (Tag 0x0112)
-        exifData.append(contentsOf: [0x01, 0x12]) // Tag: Orientation
-        exifData.append(contentsOf: [0x00, 0x03]) // Type: SHORT
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
-        let orientationValue = UInt16(orientation)
-        exifData.append(contentsOf: [
-            UInt8(orientationValue >> 8),
-            UInt8(orientationValue & 0xFF),
-            0x00, 0x00 // 填充到4字节
-        ])
-        
-        // ExifIFD 指针条目
-        exifData.append(contentsOf: [0x87, 0x69]) // Tag 34665
-        exifData.append(contentsOf: [0x00, 0x04]) // Type: LONG
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
-        exifData.append(contentsOf: [
-            UInt8(exifIFDOffset >> 24),
-            UInt8(exifIFDOffset >> 16),
-            UInt8(exifIFDOffset >> 8),
-            UInt8(exifIFDOffset)
-        ])
-        
-        // IFD0 的下一个 IFD 偏移量 (0 表示没有下一个)
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        
-        // ExifIFD
-        // ExifIFD 条目数量
-        exifData.append(contentsOf: [0x00, 0x01])
-        
-        // 0x8897 标签条目
-        exifData.append(contentsOf: [0x88, 0x97]) // Tag
-        exifData.append(contentsOf: [0x00, 0x01]) // Type: BYTE
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
-        exifData.append(contentsOf: [0x01, 0x00, 0x00, 0x00]) // Value: 1
-        
-        // ExifIFD 的下一个 IFD 偏移量
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        
-        // 创建完整的 EXIF APP1 段
-        var exifSegment = Data()
-        exifSegment.append(contentsOf: [0xFF, 0xE1])
-        let exifLength = 2 + 6 + exifData.count // 2(长度字段) + 6(Exif\0\0) + TIFF数据长度
-        exifSegment.append(contentsOf: [UInt8(exifLength >> 8), UInt8(exifLength & 0xFF)])
-        exifSegment.append(contentsOf: "Exif\0\0".data(using: .ascii)!)
-        exifSegment.append(exifData)
-
-        // 设置图像和元数据
-        CGImageDestinationAddImage(destination, imageRef, metadata as CFDictionary)
-        
-        guard CGImageDestinationFinalize(destination) else {
-            throw ConversionError.conversionFailed
-        }
-
-        // 读取生成的图像数据
-        var finalData = try Data(contentsOf: outputURL)
-        
-        // 在 JPEG 头部之后插入 EXIF 和 XMP 段
+        // 在 JPEG 文件中插入 XMP 段
+        // 找到第一个 APP 段之后插入 XMP
         if finalData.count >= 2 {
-            // 保存 JPEG 头部
-            let jpegHeader = finalData.prefix(2)
-            finalData.removeFirst(2)
+            var insertPosition = 2 // 跳过 SOI (0xFF 0xD8)
             
-            // 重新组装数据
+            // 查找第一个 APP 段的结束位置
+            while insertPosition < finalData.count - 1 {
+                if finalData[insertPosition] == 0xFF {
+                    let marker = finalData[insertPosition + 1]
+                    // 如果是 APP 段 (0xE0-0xEF)，跳过
+                    if marker >= 0xE0 && marker <= 0xEF {
+                        // 读取段长度
+                        if insertPosition + 3 < finalData.count {
+                            let length = (Int(finalData[insertPosition + 2]) << 8) | Int(finalData[insertPosition + 3])
+                            insertPosition += 2 + length
+                            continue
+                        }
+                    } else if marker == 0xD8 || marker == 0xD9 {
+                        insertPosition += 2
+                        continue
+                    } else {
+                        // 找到插入位置（第一个非 APP 段之前）
+                        break
+                    }
+                }
+                insertPosition += 1
+            }
+            
+            // 在第一个 APP 段之后插入 XMP 段
             var newData = Data()
-            newData.append(jpegHeader)        // SOI
-            newData.append(exifSegment)       // EXIF
-            newData.append(xmpSegment)        // XMP（现在放在 EXIF 后面）
-            newData.append(finalData)         // 其余 JPEG 数据
+            newData.append(finalData.prefix(insertPosition))
+            newData.append(xmpSegment)
+            newData.append(finalData.suffix(from: insertPosition))
             
             try newData.write(to: outputURL)
         }
