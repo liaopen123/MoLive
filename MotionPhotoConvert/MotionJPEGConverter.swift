@@ -327,13 +327,13 @@ extension Converter {
         // 读取生成的图像数据
         var finalData = try Data(contentsOf: outputURL)
         
-        // 在 JPEG 头部之后插入 EXIF 和 XMP 段
+        // 在 JPEG 头部之后插入 EXIF 和 XMP 段（与旧版本保持一致）
         if finalData.count >= 2 {
             // 保存 JPEG 头部
             let jpegHeader = finalData.prefix(2)
             finalData.removeFirst(2)
             
-            // 重新组装数据
+            // 重新组装数据（与旧版本完全一致）
             var newData = Data()
             newData.append(jpegHeader)        // SOI
             newData.append(exifSegment)       // EXIF
