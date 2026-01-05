@@ -208,29 +208,158 @@ extension Converter {
     }
     
     private func addXiaomiMetadata(to url: URL, offset: Int) async throws -> URL {
-        // 读��原始图片数据
+        // 1. 读取原始数据并提取 iPhone 基础元数据
         let imageData = try Data(contentsOf: url)
-
-        // 创建输出 URL
-        let outputURL = url.deletingLastPathComponent()
-            .appendingPathComponent("MVIMG_\(UUID().uuidString)")
-            .appendingPathExtension("jpg")
-
-        // 创建 CGImageSource 来处理图像和元数据
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
               let imageRef = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),
               let metadata = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
             throw ConversionError.conversionFailed
         }
 
-        // 创建目标图像
-        guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL,
-                                                              UTType.jpeg.identifier as CFString,
-                                                              1, nil) else {
+        let tiffDict = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+        let make = tiffDict[kCGImagePropertyTIFFMake as String] as? String ?? "Apple"
+        let model = tiffDict[kCGImagePropertyTIFFModel as String] as? String ?? "iPhone"
+        let software = tiffDict[kCGImagePropertyTIFFSoftware as String] as? String ?? "iOS"
+        let dateTime = tiffDict[kCGImagePropertyTIFFDateTime as String] as? String ?? ""
+        let orientation = tiffDict[kCGImagePropertyTIFFOrientation as? String ?? "Orientation"] as? UInt16 ?? 1
+        
+        // 提取 GPS 信息
+        let gpsDict = metadata[kCGImagePropertyGPSDictionary as String] as? [String: Any] ?? [:]
+
+        // 2. 生成不带任何元数据的纯净 JPEG 图像主体
+        let outputURL = url.deletingLastPathComponent()
+            .appendingPathComponent("MVIMG_\(UUID().uuidString)")
+            .appendingPathExtension("jpg")
+
+        guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             throw ConversionError.conversionFailed
         }
+        // 使用空的元数据字典写入，并确保移除 alpha 通道以解决内存警告
+        let options: [String: Any] = [
+            kCGImageDestinationLossyCompressionQuality as String: 1.0,
+            kCGImagePropertyHasAlpha as String: false
+        ]
+        CGImageDestinationAddImage(destination, imageRef, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw ConversionError.conversionFailed
+        }
+        let pureImageData = try Data(contentsOf: outputURL)
 
-        // 创建 XMP 元数据
+        // 3. 构建 EXIF 段 (APP1)
+        var exifData = Data()
+        // TIFF 头部 (8 bytes)
+        exifData.append(contentsOf: [0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08])
+        
+        // 准备字符串和 GPS 数据
+        let makeData = (make + "\0").data(using: .utf8)!
+        let modelData = (model + "\0").data(using: .utf8)!
+        let softwareData = (software + "\0").data(using: .utf8)!
+        let dateTimeData = (dateTime.isEmpty ? "" : dateTime + "\0").data(using: .utf8)!
+        
+        // IFD0 结构计算
+        let hasGPS = !gpsDict.isEmpty
+        let ifd0EntriesCount: UInt16 = 6 + (hasGPS ? 1 : 0)
+        let ifd0Size = 2 + (Int(ifd0EntriesCount) * 12) + 4
+        var currentOffset = UInt32(8 + ifd0Size)
+        
+        let makeOff = currentOffset; currentOffset += UInt32(makeData.count)
+        let modelOff = currentOffset; currentOffset += UInt32(modelData.count)
+        let softwareOff = currentOffset; currentOffset += UInt32(softwareData.count)
+        let dateTimeOff = dateTimeData.isEmpty ? 0 : currentOffset
+        if !dateTimeData.isEmpty { currentOffset += UInt32(dateTimeData.count) }
+        
+        let gpsIFDOff = hasGPS ? currentOffset : 0
+        
+        // 构建 GPS 数据块 (如果存在)
+        var gpsContentData = Data()
+        if hasGPS {
+            var entries: [(tag: UInt16, type: UInt16, count: UInt32, data: Data)] = []
+            
+            // GPSVersionID
+            entries.append((0x0000, 1, 4, Data([0x02, 0x03, 0x00, 0x00])))
+            
+            if let ref = gpsDict[kCGImagePropertyGPSLatitudeRef as String] as? String {
+                entries.append((0x0001, 2, 2, (ref + "\0").data(using: .ascii)!))
+            }
+            if let val = gpsDict[kCGImagePropertyGPSLatitude as String] as? Double {
+                entries.append((0x0002, 5, 3, packGPSCoordinate(val)))
+            }
+            if let ref = gpsDict[kCGImagePropertyGPSLongitudeRef as String] as? String {
+                entries.append((0x0003, 2, 2, (ref + "\0").data(using: .ascii)!))
+            }
+            if let val = gpsDict[kCGImagePropertyGPSLongitude as String] as? Double {
+                entries.append((0x0004, 5, 3, packGPSCoordinate(val)))
+            }
+            if let ref = gpsDict[kCGImagePropertyGPSAltitudeRef as String] as? UInt8 {
+                entries.append((0x0005, 1, 1, Data([ref, 0, 0, 0])))
+            }
+            if let val = gpsDict[kCGImagePropertyGPSAltitude as String] as? Double {
+                entries.append((0x0006, 5, 1, packRational(val)))
+            }
+
+            gpsContentData.append(contentsOf: packUInt16(UInt16(entries.count)))
+            let gpsEntriesSize = entries.count * 12
+            // 关键：偏移量必须相对于 TIFF 头部 (MM)
+            var gpsDataOffset = gpsIFDOff + UInt32(2 + gpsEntriesSize + 4)
+            
+            var entryData = Data()
+            var valueData = Data()
+            
+            for entry in entries {
+                entryData.append(contentsOf: packUInt16(entry.tag))
+                entryData.append(contentsOf: packUInt16(entry.type))
+                entryData.append(contentsOf: packUInt32(entry.count))
+                
+                if entry.data.count <= 4 {
+                    var padded = entry.data
+                    while padded.count < 4 { padded.append(0) }
+                    entryData.append(padded)
+                } else {
+                    entryData.append(contentsOf: packUInt32(gpsDataOffset))
+                    valueData.append(entry.data)
+                    gpsDataOffset += UInt32(entry.data.count)
+                }
+            }
+            gpsContentData.append(entryData)
+            gpsContentData.append(contentsOf: [0, 0, 0, 0]) // Next GPS IFD
+            gpsContentData.append(valueData)
+            
+            currentOffset += UInt32(gpsContentData.count)
+        }
+        
+        let exifIFDOff = currentOffset
+        
+        // 写入 IFD0
+        exifData.append(contentsOf: packUInt16(ifd0EntriesCount))
+        exifData.append(contentsOf: buildExifEntry(tag: 0x010F, type: 2, count: UInt32(makeData.count), value: makeOff))
+        exifData.append(contentsOf: buildExifEntry(tag: 0x0110, type: 2, count: UInt32(modelData.count), value: modelOff))
+        exifData.append(contentsOf: buildExifEntry(tag: 0x0131, type: 2, count: UInt32(softwareData.count), value: softwareOff))
+        exifData.append(contentsOf: buildExifEntry(tag: 0x0112, type: 3, count: 1, value: UInt32(orientation) << 16))
+        exifData.append(contentsOf: buildExifEntry(tag: 0x0132, type: 2, count: UInt32(dateTimeData.count), value: dateTimeOff))
+        if hasGPS {
+            exifData.append(contentsOf: buildExifEntry(tag: 0x8825, type: 4, count: 1, value: gpsIFDOff)) // GPS IFD Offset
+        }
+        exifData.append(contentsOf: buildExifEntry(tag: 0x8769, type: 4, count: 1, value: exifIFDOff)) // ExifOffset
+        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // Next IFD offset
+        
+        // 写入字符串和 GPS 数据
+        exifData.append(makeData); exifData.append(modelData); exifData.append(softwareData)
+        if !dateTimeData.isEmpty { exifData.append(dateTimeData) }
+        if hasGPS { exifData.append(gpsContentData) }
+        
+        // 写入 ExifSubIFD (包含小米 0x8897)
+        exifData.append(contentsOf: packUInt16(1)) // 1 entry
+        exifData.append(contentsOf: buildExifEntry(tag: 0x8897, type: 1, count: 1, value: 0x01000000)) // BYTE value 1
+        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+        
+        // 封装为 APP1 段
+        var exifApp1 = Data([0xFF, 0xE1])
+        let exifLen = UInt16(exifData.count + 8) // +2(len) +6(header)
+        exifApp1.append(contentsOf: packUInt16(exifLen))
+        exifApp1.append(contentsOf: "Exif\0\0".data(using: .ascii)!)
+        exifApp1.append(exifData)
+
+        // 4. 构建 XMP 段 (APP1)
         let xmpString = """
         <?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
         <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0">
@@ -245,104 +374,80 @@ extension Converter {
         </x:xmpmeta>
         <?xpacket end="w"?>
         """
+        let xmpContent = xmpString.data(using: .utf8)!
+        let xmpId = "http://ns.adobe.com/xap/1.0/\0".data(using: .utf8)!
+        var xmpApp1 = Data([0xFF, 0xE1])
+        let xmpLen = UInt16(xmpContent.count + xmpId.count + 2)
+        xmpApp1.append(contentsOf: packUInt16(xmpLen))
+        xmpApp1.append(xmpId)
+        xmpApp1.append(xmpContent)
 
-        let xmpIdentifier = "http://ns.adobe.com/xap/1.0/\0"
-        guard let xmpIdentifierData = xmpIdentifier.data(using: .utf8) else {
-            throw ConversionError.conversionFailed
-        }
-
-        let xmpData = xmpString.data(using: .utf8) ?? Data()
-        let xmpSegmentLength = xmpIdentifierData.count + xmpData.count + 2
-
-        var xmpSegment = Data([0xFF, 0xE1])
-        xmpSegment.append(UInt8(xmpSegmentLength >> 8))
-        xmpSegment.append(UInt8(xmpSegmentLength & 0xFF))
-        xmpSegment.append(xmpIdentifierData)
-        xmpSegment.append(xmpData)
-
-        // 创建 EXIF 段
-        var exifData = Data()
-        
-        // TIFF 头部
-        exifData.append(contentsOf: [0x4D, 0x4D]) // 大端字节序 (MM)
-        exifData.append(contentsOf: [0x00, 0x2A]) // TIFF 标识符
-        
-        // IFD0 偏移量
-        let ifd0Offset: UInt32 = 8
-        exifData.append(contentsOf: [
-            UInt8(ifd0Offset >> 24),
-            UInt8(ifd0Offset >> 16),
-            UInt8(ifd0Offset >> 8),
-            UInt8(ifd0Offset)
-        ])
-        
-        // IFD0
-        let exifIFDOffset: UInt32 = UInt32(8 + 2 + 12 + 4) // TIFF头部(8) + 条目数量(2) + ExifIFD指针条目(12) + 下一个IFD指针(4)
-        
-        // IFD0 条目数量
-        exifData.append(contentsOf: [0x00, 0x01])
-        
-        // ExifIFD 指针条目
-        exifData.append(contentsOf: [0x87, 0x69]) // Tag 34665
-        exifData.append(contentsOf: [0x00, 0x04]) // Type: LONG
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
-        exifData.append(contentsOf: [
-            UInt8(exifIFDOffset >> 24),
-            UInt8(exifIFDOffset >> 16),
-            UInt8(exifIFDOffset >> 8),
-            UInt8(exifIFDOffset)
-        ])
-        
-        // IFD0 的下一个 IFD 偏移量 (0 表示没有下一个)
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        
-        // ExifIFD
-        // ExifIFD 条目数量
-        exifData.append(contentsOf: [0x00, 0x01])
-        
-        // 0x8897 标签条目
-        exifData.append(contentsOf: [0x88, 0x97]) // Tag
-        exifData.append(contentsOf: [0x00, 0x01]) // Type: BYTE
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // Count: 1
-        exifData.append(contentsOf: [0x01, 0x00, 0x00, 0x00]) // Value: 1
-        
-        // ExifIFD 的下一个 IFD 偏移量
-        exifData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        
-        // 创建完整的 EXIF APP1 段
-        var exifSegment = Data()
-        exifSegment.append(contentsOf: [0xFF, 0xE1])
-        let exifLength = 2 + 6 + exifData.count // 2(长度字段) + 6(Exif\0\0) + TIFF数据长度
-        exifSegment.append(contentsOf: [UInt8(exifLength >> 8), UInt8(exifLength & 0xFF)])
-        exifSegment.append(contentsOf: "Exif\0\0".data(using: .ascii)!)
-        exifSegment.append(exifData)
-
-        // 设置图像和元数据
-        CGImageDestinationAddImage(destination, imageRef, metadata as CFDictionary)
-        
-        guard CGImageDestinationFinalize(destination) else {
-            throw ConversionError.conversionFailed
-        }
-
-        // 读取生成的图像数据
-        var finalData = try Data(contentsOf: outputURL)
-        
-        // 在 JPEG 头部之后插入 EXIF 和 XMP 段
-        if finalData.count >= 2 {
-            // 保存 JPEG 头部
-            let jpegHeader = finalData.prefix(2)
-            finalData.removeFirst(2)
-            
-            // 重新组装数据
-            var newData = Data()
-            newData.append(jpegHeader)        // SOI
-            newData.append(exifSegment)       // EXIF
-            newData.append(xmpSegment)        // XMP（现在放在 EXIF 后面）
-            newData.append(finalData)         // 其余 JPEG 数据
-            
-            try newData.write(to: outputURL)
+        // 5. 重新拼装完整文件
+        var finalData = Data()
+        if pureImageData.count >= 2 {
+            finalData.append(pureImageData.prefix(2)) // SOI
+            finalData.append(exifApp1)
+            finalData.append(xmpApp1)
+            finalData.append(pureImageData.dropFirst(2)) // 图像主体
+            try finalData.write(to: outputURL)
         }
 
         return outputURL
     }
-} 
+
+    private func packUInt16(_ value: UInt16) -> [UInt8] {
+        return [UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)]
+    }
+
+    private func packUInt32(_ value: UInt32) -> [UInt8] {
+        return [
+            UInt8((value >> 24) & 0xFF),
+            UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF),
+            UInt8(value & 0xFF)
+        ]
+    }
+
+    private func buildExifEntry(tag: UInt16, type: UInt16, count: UInt32, value: UInt32) -> Data {
+        var entry = Data()
+        entry.append(contentsOf: packUInt16(tag))
+        entry.append(contentsOf: packUInt16(type))
+        entry.append(contentsOf: packUInt32(count))
+        entry.append(contentsOf: packUInt32(value))
+        return entry
+    }
+
+    private func packRational(_ value: Double) -> Data {
+        var data = Data()
+        // 简化处理：保留 3 位小数
+        let precision: Double = 1000
+        let numerator = UInt32(round(abs(value) * precision))
+        let denominator = UInt32(precision)
+        data.append(contentsOf: packUInt32(numerator))
+        data.append(contentsOf: packUInt32(denominator))
+        return data
+    }
+
+    private func packGPSCoordinate(_ value: Double) -> Data {
+        let absValue = abs(value)
+        let degrees = floor(absValue)
+        let minutes = floor((absValue - degrees) * 60.0)
+        let seconds = (absValue - degrees - minutes / 60.0) * 3600.0
+        
+        var data = Data()
+        // Degrees (Rational: numerator/denominator)
+        data.append(contentsOf: packUInt32(UInt32(degrees)))
+        data.append(contentsOf: packUInt32(1))
+        
+        // Minutes
+        data.append(contentsOf: packUInt32(UInt32(minutes)))
+        data.append(contentsOf: packUInt32(1))
+        
+        // Seconds (保留 3 位小数)
+        let precision: Double = 1000
+        data.append(contentsOf: packUInt32(UInt32(round(seconds * precision))))
+        data.append(contentsOf: packUInt32(UInt32(precision)))
+        
+        return data
+    }
+}
