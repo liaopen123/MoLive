@@ -88,8 +88,6 @@ extension Converter {
             
             // 添加元数据
             let photoWithMetadata = try await addXiaomiMetadata(to: tempJPEGURL, offset: videoData.count)
-            let photoData = try Data(contentsOf: photoWithMetadata)
-            print("添加元数据后的照片大小: \(photoData.count) 字节")
             
             // 合并数据
             var finalData = try Data(contentsOf: photoWithMetadata)
@@ -103,6 +101,10 @@ extension Converter {
             finalData.append(videoData)
             print("最终文件大小: \(finalData.count) 字节")
             try finalData.write(to: outputURL)
+            
+            // 清理中间临时文件
+            try? FileManager.default.removeItem(at: tempJPEGURL)
+            try? FileManager.default.removeItem(at: photoWithMetadata)
             
             return outputURL
         } catch {
