@@ -64,7 +64,7 @@ struct ContentView: View {
             .photosPicker(
                 isPresented: $showingPhotoPicker,
                 selection: $conversionState.selectedItems,
-                maxSelectionCount: 10,
+                maxSelectionCount: 1,
                 matching: conversionState.convertMode == .motionJPEGToLive ? .images : .livePhotos
             )
             .fileImporter(
@@ -320,7 +320,8 @@ struct ContentView: View {
     
     private func loadTransferables() async {
         // 检查权限
-        if permissionManager.photoLibraryPermissionStatus != .authorized {
+        if permissionManager.photoLibraryPermissionStatus != .authorized &&
+           permissionManager.photoLibraryPermissionStatus != .limited {
             await withCheckedContinuation { continuation in
                 permissionManager.requestPhotoLibraryPermission { granted in
                     if !granted {
@@ -407,7 +408,10 @@ struct ContentView: View {
     
     private func clearAllTempFiles() {
         let tempDir = FileManager.default.temporaryDirectory
-        let ownedPrefixes = ["LivePhotoConvert_", "MotionJPEGConvert_", "LivePhotoTemp_", "MoLiveSelection_"]
+        let ownedPrefixes = [
+            "LivePhotoConvert_", "MotionJPEGConvert_", "LivePhotoTemp_",
+            "MoLiveSelection_", "MoLiveValidation_", "temp_video_", "temp_"
+        ]
         do {
             let files = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
             for file in files where ownedPrefixes.contains(where: file.lastPathComponent.hasPrefix) {

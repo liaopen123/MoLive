@@ -69,14 +69,13 @@ extension Converter {
             videoURL: videoURL,
             stillImageTime: stillImageTime
         )
+        defer {
+            try? FileManager.default.removeItem(at: resources.pairedImage.deletingLastPathComponent())
+        }
         
         // 2. 保存到相册
         print("开始保存到相册...")
         try await saveLivePhotoResources(resources)
-        
-        // 3. 清理临时文件
-        try? FileManager.default.removeItem(at: resources.pairedImage)
-        try? FileManager.default.removeItem(at: resources.pairedVideo)
         
         print("Live Photo保存成功")
     }
@@ -88,6 +87,12 @@ extension Converter {
     ) async throws -> LivePhotoResources {
         // 1. 创建临时目录
         let tempDirectory = try createTempDirectory(prefix: "LivePhotoTemp")
+        var completedSuccessfully = false
+        defer {
+            if !completedSuccessfully {
+                try? FileManager.default.removeItem(at: tempDirectory)
+            }
+        }
         
         // 2. 生成资源标识符
         let assetIdentifier = UUID().uuidString
@@ -102,13 +107,13 @@ extension Converter {
         }
         
         // 添加资源标识符和显示时间
-        let assetIdentifierInfo = [
-            "17": assetIdentifier,
-            "PhotoTime": 0.5  // 设置在视频中间显示照片
-        ] as [String : Any]
-        imageProperties[kCGImagePropertyMakerAppleDictionary as String] = assetIdentifierInfo
+        var makerApple = imageProperties[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any] ?? [:]
+        makerApple["17"] = assetIdentifier
+        imageProperties[kCGImagePropertyMakerAppleDictionary as String] = makerApple
         CGImageDestinationAddImage(imageDestination, imageRef, imageProperties as CFDictionary)
-        CGImageDestinationFinalize(imageDestination)
+        guard CGImageDestinationFinalize(imageDestination) else {
+            throw ConversionError.conversionFailed
+        }
         
         // 4. 处理视频
         let pairedVideoURL = tempDirectory.appendingPathComponent("paired_video").appendingPathExtension("mov")
@@ -229,6 +234,7 @@ extension Converter {
             throw assetWriter.error ?? ConversionError.videoCreationFailed
         }
         
+        completedSuccessfully = true
         return (pairedImageURL, pairedVideoURL)
     }
 

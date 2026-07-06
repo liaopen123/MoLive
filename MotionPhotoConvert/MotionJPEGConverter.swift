@@ -126,7 +126,8 @@ extension Converter {
 
             // 附加视频数据并写入最终文件
             finalData.append(videoData)
-            _ = try Self.motionPhotoComponents(from: finalData)
+            let validation = try await Self.validateMotionPhoto(data: finalData)
+            print("验证通过：\(validation.summary)")
             print("最终文件大小: \(finalData.count) 字节")
             try finalData.write(to: outputURL)
             
@@ -186,6 +187,66 @@ extension Converter {
         let videoData: Data
         let videoStartOffset: Int
         let usedXMPVideoOffset: Bool
+    }
+
+    struct MotionPhotoValidationReport {
+        let jpegByteCount: Int
+        let videoByteCount: Int
+        let pixelSize: CGSize
+        let duration: TimeInterval
+        let hasAudio: Bool
+        let presentationTimestampUs: Int64?
+        let usesContainerDirectory: Bool
+        let usesLegacyMicroVideo: Bool
+
+        var summary: String {
+            let audio = hasAudio ? "含音轨" : "无音轨"
+            return "JPEG \(jpegByteCount) B，视频 \(videoByteCount) B，\(duration) 秒，\(audio)"
+        }
+    }
+
+    static func validateMotionPhoto(data: Data) async throws -> MotionPhotoValidationReport {
+        let components = try motionPhotoComponents(from: data)
+        guard let imageSource = CGImageSourceCreateWithData(components.jpegData as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+              CGImageSourceCreateImageAtIndex(imageSource, 0, nil) != nil else {
+            throw ConversionError.invalidInput
+        }
+        let width = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?.doubleValue ?? 0
+        let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.doubleValue ?? 0
+        guard width > 0, height > 0 else { throw ConversionError.invalidInput }
+
+        let videoURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MoLiveValidation_\(UUID().uuidString)")
+            .appendingPathExtension("mp4")
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        try components.videoData.write(to: videoURL, options: .atomic)
+
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        guard duration.isNumeric, duration.seconds > 0, !videoTracks.isEmpty else {
+            throw ConversionError.invalidInput
+        }
+
+        let presentationTime = motionPhotoPresentationTime(fromJPEGData: components.jpegData)
+        if let presentationTime,
+           (presentationTime < .zero || presentationTime > duration) {
+            throw ConversionError.xmpParsingError("展示帧时间超出视频范围")
+        }
+
+        return MotionPhotoValidationReport(
+            jpegByteCount: components.jpegData.count,
+            videoByteCount: components.videoData.count,
+            pixelSize: CGSize(width: width, height: height),
+            duration: duration.seconds,
+            hasAudio: !(try await asset.loadTracks(withMediaType: .audio)).isEmpty,
+            presentationTimestampUs: presentationTime.map {
+                presentationTimestampMicroseconds($0, duration: duration)
+            },
+            usesContainerDirectory: containerMotionPhotoLength(from: components.jpegData) != nil,
+            usesLegacyMicroVideo: microVideoOffset(from: components.jpegData) != nil
+        )
     }
 
     /// 优先使用 XMP 中“从文件尾部计算”的视频长度。

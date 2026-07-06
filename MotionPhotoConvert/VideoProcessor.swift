@@ -86,32 +86,42 @@ extension Converter {
         let tempOutputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("temp_video_\(UUID().uuidString)")
             .appendingPathExtension("mp4")
+        defer { try? FileManager.default.removeItem(at: tempOutputURL) }
         
-        // 创建导出会话
-        // Passthrough 只保留旋转矩阵，部分 Android 相册会忽略它。
-        // 这里通过 videoComposition 将方向真正烘焙进视频帧。
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+        let canPassThrough = try await canPassThroughToMP4(
+            asset: asset,
+            videoTrack: videoTrack,
+            preferredTransform: preferredTransform
+        )
+        let preset = canPassThrough ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: preset) else {
             throw ConversionError.videoCreationFailed
         }
 
-        let videoComposition = AVMutableVideoComposition()
-        videoComposition.renderSize = renderSize
-        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
-        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(nominalFrameRate.rounded(), 30)))
+        if !canPassThrough {
+            // 旋转矩阵或不兼容编码存在时才重新编码。
+            let videoComposition = AVMutableVideoComposition()
+            videoComposition.renderSize = renderSize
+            let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
+            videoComposition.frameDuration = CMTime(
+                value: 1,
+                timescale: CMTimeScale(max(nominalFrameRate.rounded(), 30))
+            )
 
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
-        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
-        layerInstruction.setTransform(renderTransform, at: .zero)
-        instruction.layerInstructions = [layerInstruction]
-        videoComposition.instructions = [instruction]
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+            layerInstruction.setTransform(renderTransform, at: .zero)
+            instruction.layerInstructions = [layerInstruction]
+            videoComposition.instructions = [instruction]
+            exportSession.videoComposition = videoComposition
+        }
         
         // 设置导出参数
         exportSession.outputURL = tempOutputURL
         exportSession.outputFileType = .mp4
         exportSession.shouldOptimizeForNetworkUse = true
         exportSession.timeRange = CMTimeRange(start: .zero, duration: duration)
-        exportSession.videoComposition = videoComposition
         
         print("开始转码视频...")
         // 执行导出
@@ -122,10 +132,27 @@ extension Converter {
         let videoData = try Data(contentsOf: tempOutputURL)
         print("视频转码完成，大小：\(videoData.count) 字节")
         
-        // 清理临时文件
-        try? FileManager.default.removeItem(at: tempOutputURL)
-        
         return (videoData, stillImageTime)
+    }
+
+    private func canPassThroughToMP4(
+        asset: AVAsset,
+        videoTrack: AVAssetTrack,
+        preferredTransform: CGAffineTransform
+    ) async throws -> Bool {
+        guard preferredTransform.isIdentity else { return false }
+        let videoDescriptions = try await videoTrack.load(.formatDescriptions)
+        guard let videoSubtype = videoDescriptions.first.map(CMFormatDescriptionGetMediaSubType),
+              videoSubtype == kCMVideoCodecType_H264 || videoSubtype == kCMVideoCodecType_HEVC else {
+            return false
+        }
+
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            return true
+        }
+        let audioDescriptions = try await audioTrack.load(.formatDescriptions)
+        // 'mp4a' 是 MP4 中 AAC 的 sample entry。
+        return audioDescriptions.first.map(CMFormatDescriptionGetMediaSubType) == 0x6D703461
     }
 
     /// 读取 Apple Live Photo 配对视频中的展示帧时间。

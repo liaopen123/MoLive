@@ -53,6 +53,16 @@ class BatchConversionManager: ObservableObject {
         }
         
         guard !pendingIndices.isEmpty else { return }
+
+        await MainActor.run {
+            state.failedCount = 0
+            state.successCount = 0
+            state.conversionProgress = 0
+            for index in pendingIndices {
+                state.batchAssets[index].status = .pending
+                state.batchAssets[index].error = nil
+            }
+        }
         
         let album = try? await getOrCreateAlbum()
         let totalToConvert = pendingIndices.count
@@ -64,6 +74,9 @@ class BatchConversionManager: ObservableObject {
             while currentIndex < maxConcurrentTasks && currentIndex < pendingIndices.count {
                 let taskIndex = pendingIndices[currentIndex]
                 let asset = state.batchAssets[taskIndex].asset
+                await MainActor.run {
+                    state.batchAssets[taskIndex].status = .converting
+                }
                 group.addTask {
                     await self.processSingleAsset(index: taskIndex, asset: asset, album: album)
                 }
@@ -82,6 +95,9 @@ class BatchConversionManager: ObservableObject {
                 if currentIndex < pendingIndices.count {
                     let nextTaskIndex = pendingIndices[currentIndex]
                     let nextAsset = state.batchAssets[nextTaskIndex].asset
+                    await MainActor.run {
+                        state.batchAssets[nextTaskIndex].status = .converting
+                    }
                     group.addTask {
                         await self.processSingleAsset(index: nextTaskIndex, asset: nextAsset, album: album)
                     }

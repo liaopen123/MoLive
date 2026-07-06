@@ -20,7 +20,7 @@ MoLive 的目标不只是“能生成文件”，而是在 iOS 上可靠地迁�
 - [x] Motion Photo 反向转换时保留视频音轨。
 - [x] 按 XMP offset 分离视频，JPEG EOI / ISO BMFF box 扫描仅作降级方案。
 - [x] 生成较新的 Google Motion Photo Container XMP，同时保留 GCamera 兼容字段。
-- [ ] 实现生成后验证器：JPEG、XMP、offset、MP4 box、时长和展示帧。
+- [x] 实现生成后验证器：JPEG、XMP、offset、MP4 box、时长、音轨和展示帧。
 
 ## P1：稳定性与批量迁移
 
@@ -36,7 +36,7 @@ MoLive 的目标不只是“能生成文件”，而是在 iOS 上可靠地迁�
 ## P2：多设备兼容与修复
 
 - [ ] 提供小米 / Pixel / 三星 / 通用 Android 输出预设。
-- [ ] 只在音频非 AAC 时转码，其余视频流优先直接复用。
+- [x] 仅当方向需烘焙或视频/音频编码不兼容时转码，其余流直接复用。
 - [ ] 加入 Motion Photo 修复器：修复 XMP、offset、方向、音频和被截断的 EOI。
 - [ ] 支持从 Files 批量导入 HEIC/JPEG + MOV，按 Content Identifier 自动配对。
 - [ ] 支持文件名和拍摄日期降级配对，并显示配对置信度。
