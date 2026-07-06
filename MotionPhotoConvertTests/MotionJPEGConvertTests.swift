@@ -73,6 +73,7 @@ struct MotionJPEGConvertTests {
         #expect(components.jpegData == jpeg)
         #expect(components.videoData == video)
         #expect(components.usedXMPVideoOffset)
+        #expect(!components.repairedMissingJPEGEnd)
     }
 
     @Test func motionPhotoFallsBackToFtypAfterJPEG() throws {
@@ -84,6 +85,20 @@ struct MotionJPEGConvertTests {
         #expect(components.jpegData == jpeg)
         #expect(components.videoData == video)
         #expect(!components.usedXMPVideoOffset)
+    }
+
+    @Test func legacyMoLiveFileWithoutJPEGEndIsRepaired() throws {
+        let video = makeFtypBox()
+        let xmp = "<GCamera:MicroVideoOffset>\(video.count)</GCamera:MicroVideoOffset>"
+        var jpegWithoutEnd = Data([0xFF, 0xD8, 0xFF, 0xE1])
+        let segmentLength = UInt16(xmp.utf8.count + 2)
+        jpegWithoutEnd.append(UInt8(segmentLength >> 8))
+        jpegWithoutEnd.append(UInt8(segmentLength & 0xFF))
+        jpegWithoutEnd.append(Data(xmp.utf8))
+
+        let components = try Converter.motionPhotoComponents(from: jpegWithoutEnd + video)
+        #expect(components.jpegData.suffix(2) == Data([0xFF, 0xD9]))
+        #expect(components.repairedMissingJPEGEnd)
     }
 
     @Test func containerDirectoryVideoLengthIsParsed() {

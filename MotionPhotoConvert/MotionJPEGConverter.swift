@@ -187,6 +187,7 @@ extension Converter {
         let videoData: Data
         let videoStartOffset: Int
         let usedXMPVideoOffset: Bool
+        let repairedMissingJPEGEnd: Bool
     }
 
     struct MotionPhotoValidationReport {
@@ -252,10 +253,6 @@ extension Converter {
     /// 优先使用 XMP 中“从文件尾部计算”的视频长度。
     /// 旧文件缺少 offset 时，才从完整 JPEG EOI 之后扫描 ISO BMFF ftyp box。
     static func motionPhotoComponents(from data: Data) throws -> MotionPhotoComponents {
-        guard let jpegEnd = jpegEndOffset(in: data) else {
-            throw ConversionError.invalidInput
-        }
-
         let containerLength = containerMotionPhotoLength(from: data)
         let legacyLength = microVideoOffset(from: data)
         if let containerLength, let legacyLength, containerLength != legacyLength {
@@ -266,18 +263,39 @@ extension Converter {
            videoLength > 0,
            videoLength < data.count {
             let videoStart = data.count - videoLength
-            guard videoStart >= jpegEnd,
-                  isISOBaseMediaFile(data, at: videoStart) else {
+            guard isISOBaseMediaFile(data, at: videoStart) else {
                 throw ConversionError.xmpParsingError("视频 offset 与文件结构不匹配")
             }
+            var repairedMissingJPEGEnd = false
+            let jpegData: Data
+            if let jpegEnd = jpegEndOffset(in: data), jpegEnd <= videoStart {
+                jpegData = data.subdata(in: 0..<jpegEnd)
+            } else {
+                // MoLive 旧版曾在拼接前删除 FF D9。XMP offset 可以精确界定图片与视频，
+                // 因此可安全地为这类存量文件恢复 JPEG 结束标记。
+                var candidate = data.subdata(in: 0..<videoStart)
+                guard candidate.count >= 2, candidate[0] == 0xFF, candidate[1] == 0xD8 else {
+                    throw ConversionError.invalidInput
+                }
+                candidate.append(contentsOf: [0xFF, 0xD9])
+                guard CGImageSourceCreateWithData(candidate as CFData, nil) != nil else {
+                    throw ConversionError.invalidInput
+                }
+                jpegData = candidate
+                repairedMissingJPEGEnd = true
+            }
             return MotionPhotoComponents(
-                jpegData: data.subdata(in: 0..<jpegEnd),
+                jpegData: jpegData,
                 videoData: data.subdata(in: videoStart..<data.count),
                 videoStartOffset: videoStart,
-                usedXMPVideoOffset: true
+                usedXMPVideoOffset: true,
+                repairedMissingJPEGEnd: repairedMissingJPEGEnd
             )
         }
 
+        guard let jpegEnd = jpegEndOffset(in: data) else {
+            throw ConversionError.invalidInput
+        }
         guard let videoStart = firstISOBaseMediaOffset(in: data, startingAt: jpegEnd) else {
             throw ConversionError.invalidInput
         }
@@ -285,7 +303,8 @@ extension Converter {
             jpegData: data.subdata(in: 0..<jpegEnd),
             videoData: data.subdata(in: videoStart..<data.count),
             videoStartOffset: videoStart,
-            usedXMPVideoOffset: false
+            usedXMPVideoOffset: false,
+            repairedMissingJPEGEnd: false
         )
     }
 

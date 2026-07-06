@@ -105,6 +105,13 @@ struct ContentView: View {
                 }
                 .padding()
             }
+
+            if let summary = conversionState.validationSummary {
+                Label(summary, systemImage: "checkmark.shield.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .padding(.horizontal)
+            }
             
             Button(action: {
                 Task {
@@ -374,6 +381,8 @@ struct ContentView: View {
             switch conversionState.convertMode {
             case .motionJPEGToLive:
                 if let url = conversionState.selectedURLs.first {
+                    let report = try await Converter.validateMotionPhoto(data: Data(contentsOf: url))
+                    conversionState.validationSummary = report.summary
                     try await MotionJPEGToLiveConverter.shared.convert(from: url)
                     showingAlert = true
                     alertMessage = "转换成功！Live Photo 已保存到相册。"
@@ -381,6 +390,8 @@ struct ContentView: View {
             case .liveToMotionJPEG:
                 if let item = conversionState.selectedItems.first {
                     let processedURL = try await LiveToMotionJPEGConverter.shared.convert(from: item)
+                    let report = try await Converter.validateMotionPhoto(data: Data(contentsOf: processedURL))
+                    conversionState.validationSummary = report.summary
                     convertedFileURL = processedURL
                     showingShareSheet = true
                 }

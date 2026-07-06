@@ -25,6 +25,7 @@ class ConversionState: ObservableObject {
     @Published var isConverting = false
     @Published var conversionProgress: Double = 0
     @Published var convertMode: ConvertMode = .motionJPEGToLive
+    @Published var validationSummary: String?
     
     // 批处理相关
     @Published var batchAssets: [BatchTask] = []
@@ -40,7 +41,7 @@ class ConversionState: ObservableObject {
         return pending
     }
     
-    private let historyKey = "ConvertedLivePhotoIDs"
+    private let legacyHistoryKey = "ConvertedLivePhotoIDs"
     
     struct BatchTask: Identifiable {
         let id: String // PHAsset localIdentifier
@@ -68,6 +69,7 @@ class ConversionState: ObservableObject {
         selectedURLs.removeAll()
         batchAssets.removeAll()
         conversionProgress = 0
+        validationSummary = nil
         isConverting = false
         successCount = 0
         failedCount = 0
@@ -77,13 +79,39 @@ class ConversionState: ObservableObject {
     
     // 历史记录管理
     func getConvertedIDs() -> Set<String> {
-        let array = UserDefaults.standard.stringArray(forKey: historyKey) ?? []
-        return Set(array)
+        if let data = try? Data(contentsOf: historyURL),
+           let array = try? JSONDecoder().decode([String].self, from: data) {
+            return Set(array)
+        }
+
+        let legacy = UserDefaults.standard.stringArray(forKey: legacyHistoryKey) ?? []
+        if !legacy.isEmpty {
+            persistConvertedIDs(Set(legacy))
+            UserDefaults.standard.removeObject(forKey: legacyHistoryKey)
+        }
+        return Set(legacy)
     }
     
     func saveConvertedID(_ id: String) {
         var ids = getConvertedIDs()
         ids.insert(id)
-        UserDefaults.standard.set(Array(ids), forKey: historyKey)
+        persistConvertedIDs(ids)
+    }
+
+    func clearConversionHistory() {
+        try? FileManager.default.removeItem(at: historyURL)
+        UserDefaults.standard.removeObject(forKey: legacyHistoryKey)
+    }
+
+    private var historyURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = base.appendingPathComponent("MoLive", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("conversion-history.json")
+    }
+
+    private func persistConvertedIDs(_ ids: Set<String>) {
+        guard let data = try? JSONEncoder().encode(ids.sorted()) else { return }
+        try? data.write(to: historyURL, options: .atomic)
     }
 }

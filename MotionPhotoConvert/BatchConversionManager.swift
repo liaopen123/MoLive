@@ -115,7 +115,7 @@ class BatchConversionManager: ObservableObject {
             // 记录临时目录路径，以便后续清理
             tempDirToCleanup = url.deletingLastPathComponent()
             
-            try await self.saveToAlbum(url: url, album: album)
+            try await self.saveToAlbum(url: url, album: album, creationDate: asset.creationDate)
             
             // 优化：保存成功后立即删除临时文件
             if let dir = tempDirToCleanup {
@@ -197,9 +197,14 @@ class BatchConversionManager: ObservableObject {
         }
     }
     
-    private func saveToAlbum(url: URL, album: PHAssetCollection?) async throws {
+    private func saveToAlbum(
+        url: URL,
+        album: PHAssetCollection?,
+        creationDate: Date?
+    ) async throws {
         try await PHPhotoLibrary.shared().performChanges {
             let assetRequest = PHAssetCreationRequest.forAsset()
+            assetRequest.creationDate = creationDate
             assetRequest.addResource(with: .photo, fileURL: url, options: nil)
             
             if let album = album, let assetPlaceholder = assetRequest.placeholderForCreatedAsset {
