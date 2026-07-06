@@ -66,11 +66,12 @@ extension Converter {
         }
     }
     
-    func processVideoForMotionJPEG(from url: URL) async throws -> Data {
+    func processVideoForMotionJPEG(from url: URL) async throws -> (data: Data, stillImageTime: CMTime) {
         print("开始处理视频数据用于 Motion JPEG...")
         
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration)
+        let stillImageTime = try await readStillImageTime(from: asset) ?? Self.defaultStillImageTime(for: duration)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ConversionError.invalidInput
         }
@@ -124,7 +125,43 @@ extension Converter {
         // 清理临时文件
         try? FileManager.default.removeItem(at: tempOutputURL)
         
-        return videoData
+        return (videoData, stillImageTime)
+    }
+
+    /// 读取 Apple Live Photo 配对视频中的展示帧时间。
+    /// metadata item 的值是 0，真正的时间位于 timed metadata group 的 timeRange.start。
+    private func readStillImageTime(from asset: AVAsset) async throws -> CMTime? {
+        let metadataTracks = try await asset.loadTracks(withMediaType: .metadata)
+        for track in metadataTracks {
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            guard reader.canAdd(output) else { continue }
+            reader.add(output)
+            let adaptor = AVAssetReaderOutputMetadataAdaptor(assetReaderTrackOutput: output)
+            guard reader.startReading() else { continue }
+
+            while let group = adaptor.nextTimedMetadataGroup() {
+                let containsStillImageMarker = group.items.contains { item in
+                    item.identifier?.rawValue == "mdta/com.apple.quicktime.still-image-time" ||
+                    (item.key as? String) == "com.apple.quicktime.still-image-time"
+                }
+                if containsStillImageMarker {
+                    return group.timeRange.start
+                }
+            }
+        }
+        return nil
+    }
+
+    static func defaultStillImageTime(for duration: CMTime) -> CMTime {
+        guard duration.isNumeric, duration.seconds > 0 else { return .zero }
+        return CMTimeMultiplyByFloat64(duration, multiplier: 0.5)
+    }
+
+    static func presentationTimestampMicroseconds(_ time: CMTime, duration: CMTime) -> Int64 {
+        guard time.isNumeric, duration.isNumeric, duration.seconds > 0 else { return 0 }
+        let clampedSeconds = min(max(time.seconds, 0), duration.seconds)
+        return Int64((clampedSeconds * 1_000_000).rounded())
     }
 
     /// 计算旋转后的显示尺寸，并将画面平移到以 (0, 0) 为原点的正坐标区域。

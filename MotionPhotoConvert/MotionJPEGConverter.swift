@@ -24,7 +24,11 @@ extension Converter {
         }
         
         // 分离图片和视频数据
-        try await separateImageAndVideo(from: data, photoURL: tempPhotoURL, videoURL: tempVideoURL)
+        let stillImageTime = try await separateImageAndVideo(
+            from: data,
+            photoURL: tempPhotoURL,
+            videoURL: tempVideoURL
+        )
         
         // 处理视频数据
         let videoData = try Data(contentsOf: tempVideoURL)
@@ -34,7 +38,11 @@ extension Converter {
         let livePhoto = try await createLivePhoto(photoURL: tempPhotoURL, videoURL: processedVideoURL)
         
         // 保存到相册
-        try await saveLivePhotoToLibrary(photoURL: tempPhotoURL, videoURL: processedVideoURL)
+        try await saveLivePhotoToLibrary(
+            photoURL: tempPhotoURL,
+            videoURL: processedVideoURL,
+            stillImageTime: stillImageTime
+        )
         
         return livePhoto
     }
@@ -88,11 +96,22 @@ extension Converter {
             }
 
             // 处理视频数据
-            let videoData = try await processVideoForMotionJPEG(from: videoURL)
+            let processedVideo = try await processVideoForMotionJPEG(from: videoURL)
+            let videoData = processedVideo.data
             print("视频数据大小: \(videoData.count) 字节")
+
+            let videoDuration = try await AVURLAsset(url: videoURL).load(.duration)
+            let presentationTimestampUs = Self.presentationTimestampMicroseconds(
+                processedVideo.stillImageTime,
+                duration: videoDuration
+            )
             
             // 添加元数据
-            let photoWithMetadata = try await addXiaomiMetadata(to: tempJPEGURL, offset: videoData.count)
+            let photoWithMetadata = try await addXiaomiMetadata(
+                to: tempJPEGURL,
+                offset: videoData.count,
+                presentationTimestampUs: presentationTimestampUs
+            )
             
             // 合并数据
             var finalData = try Data(contentsOf: photoWithMetadata)
@@ -122,7 +141,7 @@ extension Converter {
         }
     }
     
-    private func separateImageAndVideo(from data: Data, photoURL: URL, videoURL: URL) async throws {
+    private func separateImageAndVideo(from data: Data, photoURL: URL, videoURL: URL) async throws -> CMTime {
         print("开始分离图片和视频数据...")
         
         // 首先验证文件头是否为JPEG
@@ -215,9 +234,35 @@ extension Converter {
         // 保存分离的数据
         try imageData.write(to: photoURL, options: [.atomic])
         try videoData.write(to: videoURL, options: [.atomic])
+        return Self.motionPhotoPresentationTime(fromJPEGData: Data(imageData)) ?? .invalid
+    }
+
+    static func motionPhotoPresentationTime(fromJPEGData data: Data) -> CMTime? {
+        let text = String(decoding: data, as: UTF8.self)
+        let patterns = [
+            #"<GCamera:MicroVideoPresentationTimestampUs>\s*(\d+)\s*</GCamera:MicroVideoPresentationTimestampUs>"#,
+            #"GCamera:MicroVideoPresentationTimestampUs=[\"'](\d+)[\"']"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(
+                    in: text,
+                    range: NSRange(text.startIndex..., in: text)
+                  ),
+                  let valueRange = Range(match.range(at: 1), in: text),
+                  let microseconds = Int64(text[valueRange]) else {
+                continue
+            }
+            return CMTime(value: microseconds, timescale: 1_000_000)
+        }
+        return nil
     }
     
-    private func addXiaomiMetadata(to url: URL, offset: Int) async throws -> URL {
+    private func addXiaomiMetadata(
+        to url: URL,
+        offset: Int,
+        presentationTimestampUs: Int64
+    ) async throws -> URL {
         // 1. 读取原始数据并提取 iPhone 基础元数据
         let imageData = try Data(contentsOf: url)
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
@@ -380,6 +425,7 @@ extension Converter {
                  <GCamera:MicroVideo>1</GCamera:MicroVideo>
                  <GCamera:MicroVideoVersion>1</GCamera:MicroVideoVersion>
                  <GCamera:MicroVideoOffset>\(offset)</GCamera:MicroVideoOffset>
+                 <GCamera:MicroVideoPresentationTimestampUs>\(presentationTimestampUs)</GCamera:MicroVideoPresentationTimestampUs>
               </rdf:Description>
            </rdf:RDF>
         </x:xmpmeta>

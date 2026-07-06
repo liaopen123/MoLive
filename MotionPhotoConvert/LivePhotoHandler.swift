@@ -52,7 +52,11 @@ extension Converter {
         }
     }
     
-    func saveLivePhotoToLibrary(photoURL: URL, videoURL: URL) async throws {
+    func saveLivePhotoToLibrary(
+        photoURL: URL,
+        videoURL: URL,
+        stillImageTime: CMTime = .invalid
+    ) async throws {
         guard await checkPhotoLibraryPermission() else {
             throw ConversionError.noPermission
         }
@@ -60,7 +64,11 @@ extension Converter {
         print("开始生成 Live Photo...")
         
         // 1. 生成 Live Photo 资源
-        let resources = try await generateLivePhotoResources(from: photoURL, videoURL: videoURL)
+        let resources = try await generateLivePhotoResources(
+            from: photoURL,
+            videoURL: videoURL,
+            stillImageTime: stillImageTime
+        )
         
         // 2. 保存到相册
         print("开始保存到相册...")
@@ -73,7 +81,11 @@ extension Converter {
         print("Live Photo保存成功")
     }
     
-    private func generateLivePhotoResources(from photoURL: URL, videoURL: URL) async throws -> LivePhotoResources {
+    private func generateLivePhotoResources(
+        from photoURL: URL,
+        videoURL: URL,
+        stillImageTime requestedStillImageTime: CMTime
+    ) async throws -> LivePhotoResources {
         // 1. 创建临时目录
         let tempDirectory = try createTempDirectory(prefix: "LivePhotoTemp")
         
@@ -101,6 +113,10 @@ extension Converter {
         // 4. 处理视频
         let pairedVideoURL = tempDirectory.appendingPathComponent("paired_video").appendingPathExtension("mov")
         let videoAsset = AVURLAsset(url: videoURL)
+        let duration = try await videoAsset.load(.duration)
+        let stillImageTime = requestedStillImageTime.isNumeric
+            ? CMTimeMinimum(CMTimeMaximum(requestedStillImageTime, .zero), duration)
+            : Self.defaultStillImageTime(for: duration)
         
         // 获取视频属性
         let tracks = try await videoAsset.loadTracks(withMediaType: .video)
@@ -122,8 +138,41 @@ extension Converter {
                                                     AVVideoHeightKey: naturalSize.height
                                                  ])
         videoWriterInput.transform = transform
-        videoWriterInput.expectsMediaDataInRealTime = true
+        videoWriterInput.expectsMediaDataInRealTime = false
+        guard assetWriter.canAdd(videoWriterInput) else {
+            throw ConversionError.videoCreationFailed
+        }
         assetWriter.add(videoWriterInput)
+
+        let videoReader = try AVAssetReader(asset: videoAsset)
+        let videoReaderOutput = AVAssetReaderTrackOutput(
+            track: videoTrack,
+            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        )
+        guard videoReader.canAdd(videoReaderOutput) else {
+            throw ConversionError.videoCreationFailed
+        }
+        videoReader.add(videoReaderOutput)
+
+        // 保留原始音轨。旧实现只写入视频，会让反向转换的 Live Photo 静音。
+        var audioPair: (input: AVAssetWriterInput, output: AVAssetReaderTrackOutput)?
+        if let audioTrack = try await videoAsset.loadTracks(withMediaType: .audio).first {
+            let formatDescriptions = try await audioTrack.load(.formatDescriptions)
+            let audioInput = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: nil,
+                sourceFormatHint: formatDescriptions.first
+            )
+            let audioOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
+            if assetWriter.canAdd(audioInput), videoReader.canAdd(audioOutput) {
+                audioInput.expectsMediaDataInRealTime = false
+                assetWriter.add(audioInput)
+                videoReader.add(audioOutput)
+                audioPair = (audioInput, audioOutput)
+            }
+        }
+
+        let (metadataInput, metadataAdaptor) = try makeStillImageMetadataAdaptor(for: assetWriter)
         
         // 添加资源标识符元数据
         let metadataItem = AVMutableMetadataItem()
@@ -134,41 +183,109 @@ extension Converter {
         assetWriter.metadata = [metadataItem]
         
         // 开始写入视频
-        assetWriter.startWriting()
+        guard assetWriter.startWriting() else {
+            throw assetWriter.error ?? ConversionError.videoCreationFailed
+        }
         assetWriter.startSession(atSourceTime: .zero)
+
+        let stillImageItem = AVMutableMetadataItem()
+        stillImageItem.identifier = AVMetadataIdentifier(
+            rawValue: "mdta/com.apple.quicktime.still-image-time"
+        )
+        stillImageItem.dataType = "com.apple.metadata.datatype.int8"
+        stillImageItem.value = NSNumber(value: Int8(0))
+        let metadataDuration = CMTime(value: 1, timescale: 30)
+        let metadataGroup = AVTimedMetadataGroup(
+            items: [stillImageItem],
+            timeRange: CMTimeRange(start: stillImageTime, duration: metadataDuration)
+        )
+        guard metadataAdaptor.append(metadataGroup) else {
+            throw assetWriter.error ?? ConversionError.videoCreationFailed
+        }
+        metadataInput.markAsFinished()
+
+        guard videoReader.startReading() else {
+            throw videoReader.error ?? ConversionError.videoCreationFailed
+        }
+
+        async let videoWrite: Void = appendSamples(
+            from: videoReaderOutput,
+            to: videoWriterInput,
+            queueLabel: "com.molive.videowriting"
+        )
+        if let audioPair {
+            async let audioWrite: Void = appendSamples(
+                from: audioPair.output,
+                to: audioPair.input,
+                queueLabel: "com.molive.audiowriting"
+            )
+            _ = try await (videoWrite, audioWrite)
+        } else {
+            try await videoWrite
+        }
+
+        await assetWriter.finishWriting()
+        guard assetWriter.status == .completed else {
+            throw assetWriter.error ?? ConversionError.videoCreationFailed
+        }
         
-        let videoReader = try AVAssetReader(asset: videoAsset)
-        let videoReaderOutput = AVAssetReaderTrackOutput(track: videoTrack,
-                                                        outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
-        videoReader.add(videoReaderOutput)
-        videoReader.startReading()
-        
-        // 写入视频数据
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let queue = DispatchQueue(label: "com.videowriting.queue")
-            videoWriterInput.requestMediaDataWhenReady(on: queue) {
-                while videoWriterInput.isReadyForMoreMediaData {
-                    if let sampleBuffer = videoReaderOutput.copyNextSampleBuffer() {
-                        if !videoWriterInput.append(sampleBuffer) {
-                            continuation.resume(throwing: ConversionError.conversionFailed)
-                            return
-                        }
-                    } else {
-                        videoWriterInput.markAsFinished()
-                        assetWriter.finishWriting {
-                            if assetWriter.status == .completed {
-                                continuation.resume()
-                            } else {
-                                continuation.resume(throwing: ConversionError.conversionFailed)
-                            }
-                        }
+        return (pairedImageURL, pairedVideoURL)
+    }
+
+    private func makeStillImageMetadataAdaptor(
+        for writer: AVAssetWriter
+    ) throws -> (AVAssetWriterInput, AVAssetWriterInputMetadataAdaptor) {
+        let specification: [String: Any] = [
+            kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier as String:
+                "mdta/com.apple.quicktime.still-image-time",
+            kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType as String:
+                "com.apple.metadata.datatype.int8"
+        ]
+        var formatDescription: CMFormatDescription?
+        let status = CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+            allocator: kCFAllocatorDefault,
+            metadataType: kCMMetadataFormatType_Boxed,
+            metadataSpecifications: [specification] as CFArray,
+            formatDescriptionOut: &formatDescription
+        )
+        guard status == noErr, let formatDescription else {
+            throw ConversionError.videoCreationFailed
+        }
+
+        let input = AVAssetWriterInput(
+            mediaType: .metadata,
+            outputSettings: nil,
+            sourceFormatHint: formatDescription
+        )
+        guard writer.canAdd(input) else {
+            throw ConversionError.videoCreationFailed
+        }
+        writer.add(input)
+        return (input, AVAssetWriterInputMetadataAdaptor(assetWriterInput: input))
+    }
+
+    private func appendSamples(
+        from output: AVAssetReaderTrackOutput,
+        to input: AVAssetWriterInput,
+        queueLabel: String
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let queue = DispatchQueue(label: queueLabel)
+            input.requestMediaDataWhenReady(on: queue) {
+                while input.isReadyForMoreMediaData {
+                    guard let sampleBuffer = output.copyNextSampleBuffer() else {
+                        input.markAsFinished()
+                        continuation.resume()
+                        return
+                    }
+                    guard input.append(sampleBuffer) else {
+                        input.markAsFinished()
+                        continuation.resume(throwing: ConversionError.videoCreationFailed)
                         return
                     }
                 }
             }
         }
-        
-        return (pairedImageURL, pairedVideoURL)
     }
     
     private func saveLivePhotoResources(_ resources: LivePhotoResources) async throws {

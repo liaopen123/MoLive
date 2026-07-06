@@ -39,4 +39,24 @@ struct MotionJPEGConvertTests {
         #expect(abs(bounds.minY) < 0.001)
     }
 
+    @Test func presentationTimestampIsClampedToVideoDuration() {
+        let duration = CMTime(seconds: 3, preferredTimescale: 600)
+        #expect(Converter.presentationTimestampMicroseconds(
+            CMTime(seconds: 1.5, preferredTimescale: 600),
+            duration: duration
+        ) == 1_500_000)
+        #expect(Converter.presentationTimestampMicroseconds(
+            CMTime(seconds: 4, preferredTimescale: 600),
+            duration: duration
+        ) == 3_000_000)
+    }
+
+    @Test func motionPhotoPresentationTimestampCanBeParsedFromXMP() {
+        let xmp = """
+        <GCamera:MicroVideoPresentationTimestampUs>1500000</GCamera:MicroVideoPresentationTimestampUs>
+        """
+        let time = Converter.motionPhotoPresentationTime(fromJPEGData: Data(xmp.utf8))
+        #expect(time?.seconds == 1.5)
+    }
+
 }

@@ -15,8 +15,9 @@ MoLive 的目标不只是“能生成文件”，而是在 iOS 上可靠地迁�
 - [x] 将视频 `preferredTransform` 烘焙到视频帧。
 - [x] 保留 JPEG EOI，生成“完整 JPEG + MP4”。
 - [x] 消除 Live Photo 多资源并发写入同一文件的竞态。
-- [ ] 将 Live Photo 的 `com.apple.quicktime.still-image-time` 写入配对视频。
-- [ ] 从原 Live Photo 读取展示帧时间，写入 `MicroVideoPresentationTimestampUs`。
+- [x] 将 Live Photo 的 `com.apple.quicktime.still-image-time` 写入配对视频。
+- [x] 从原 Live Photo 读取展示帧时间，写入 `MicroVideoPresentationTimestampUs`。
+- [x] Motion Photo 反向转换时保留视频音轨。
 - [ ] 按 XMP offset 分离视频，JPEG EOI / ISO BMFF box 扫描仅作降级方案。
 - [ ] 生成较新的 Google Motion Photo Container XMP，同时保留 GCamera 兼容字段。
 - [ ] 实现生成后验证器：JPEG、XMP、offset、MP4 box、时长和展示帧。
