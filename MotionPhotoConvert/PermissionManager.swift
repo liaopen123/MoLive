@@ -11,13 +11,13 @@ class PermissionManager: ObservableObject {
     
     func requestPhotoLibraryPermission(completion: @escaping (Bool) -> Void) {
         // 先检查是否已经被拒绝
-        if photoLibraryPermissionStatus == .denied {
+        if photoLibraryPermissionStatus == .denied || photoLibraryPermissionStatus == .restricted {
             completion(false)
             return
         }
         
         // 如果已经授权，直接返回
-        if photoLibraryPermissionStatus == .authorized {
+        if photoLibraryPermissionStatus == .authorized || photoLibraryPermissionStatus == .limited {
             completion(true)
             return
         }
@@ -30,5 +30,9 @@ class PermissionManager: ObservableObject {
                 completion(isAuthorized)
             }
         }
+    }
+
+    func refreshStatus() {
+        photoLibraryPermissionStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     }
 }

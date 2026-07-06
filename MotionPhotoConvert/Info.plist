@@ -6,11 +6,6 @@
     <string>需要访问相册以选择和保存照片</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>需要访问相册以保存转换后的照片</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict/>
-        <dict/>
-    </array>
     <key>CFBundleIdentifier</key>
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key>

@@ -19,8 +19,8 @@ extension Converter {
         case .authorized, .limited:
             return true
         case .notDetermined:
-            let granted = await PHPhotoLibrary.requestAuthorization(for: .readWrite) == .authorized
-            return granted
+            let requested = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            return requested == .authorized || requested == .limited
         case .denied, .restricted:
             return false
         @unknown default:
@@ -44,4 +44,4 @@ extension CGImageSource {
     static func create(with url: URL) -> CGImageSource? {
         return CGImageSourceCreateWithURL(url as CFURL, nil)
     }
-} 
+}

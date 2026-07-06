@@ -11,6 +11,7 @@ import Photos
 
 struct ContentView: View {
     @EnvironmentObject private var permissionManager: PermissionManager
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var conversionState = ConversionState()
     @State private var showingPhotoPicker = false
     @State private var showingFileImporter = false
@@ -26,7 +27,8 @@ struct ContentView: View {
             Group {
                 if permissionManager.photoLibraryPermissionStatus == .notDetermined {
                     PermissionRequestView()
-                } else if permissionManager.photoLibraryPermissionStatus == .denied {
+                } else if permissionManager.photoLibraryPermissionStatus == .denied ||
+                          permissionManager.photoLibraryPermissionStatus == .restricted {
                     PermissionDeniedView()
                 } else {
                     VStack(spacing: 0) {
@@ -80,6 +82,11 @@ struct ContentView: View {
             .onChange(of: conversionState.selectedItems) { oldValue, newValue in
                 Task {
                     await loadTransferables()
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    permissionManager.refreshStatus()
                 }
             }
         }
