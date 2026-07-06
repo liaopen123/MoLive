@@ -68,7 +68,7 @@ class BatchConversionManager: ObservableObject {
         let totalToConvert = pendingIndices.count
         var completedInThisSession = 0
         
-        await withTaskGroup(of: (Int, Result<URL, Error>).self) { group in
+        await withTaskGroup(of: (Int, Result<Void, Error>).self) { group in
             var currentIndex = 0
             
             while currentIndex < maxConcurrentTasks && currentIndex < pendingIndices.count {
@@ -84,6 +84,10 @@ class BatchConversionManager: ObservableObject {
             }
             
             for await (index, result) in group {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
                 completedInThisSession += 1
                 let currentProgress = Double(completedInThisSession) / Double(totalToConvert)
                 
@@ -105,12 +109,24 @@ class BatchConversionManager: ObservableObject {
                 }
             }
         }
+
+        await MainActor.run {
+            for index in state.batchAssets.indices where state.batchAssets[index].status == .converting {
+                state.batchAssets[index].status = .pending
+            }
+        }
     }
     
-    private func processSingleAsset(index: Int, asset: PHAsset, album: PHAssetCollection?) async -> (Int, Result<URL, Error>) {
+    private func processSingleAsset(
+        index: Int,
+        asset: PHAsset,
+        album: PHAssetCollection?
+    ) async -> (Int, Result<Void, Error>) {
         var tempDirToCleanup: URL?
         do {
+            try Task.checkCancellation()
             let livePhoto = try await self.requestLivePhoto(for: asset)
+            try Task.checkCancellation()
             let url = try await Converter.shared.convertLivePhotoToMotionJPEG(from: livePhoto)
             // 记录临时目录路径，以便后续清理
             tempDirToCleanup = url.deletingLastPathComponent()
@@ -122,7 +138,7 @@ class BatchConversionManager: ObservableObject {
                 try? FileManager.default.removeItem(at: dir)
             }
             
-            return (index, .success(url))
+            return (index, .success(()))
         } catch {
             // 出错时也要尝试清理
             if let dir = tempDirToCleanup {
@@ -133,9 +149,9 @@ class BatchConversionManager: ObservableObject {
     }
     
     @MainActor
-    private func handleResult(state: ConversionState, index: Int, result: Result<URL, Error>, progress: Double) {
+    private func handleResult(state: ConversionState, index: Int, result: Result<Void, Error>, progress: Double) {
         switch result {
-        case .success(_):
+        case .success:
             state.batchAssets[index].status = .success
             state.successCount += 1
             state.saveConvertedID(state.batchAssets[index].id)
@@ -186,12 +202,17 @@ class BatchConversionManager: ObservableObject {
             options.deliveryMode = .highQualityFormat
             
             PHImageManager.default().requestLivePhoto(for: asset, targetSize: PHImageManagerMaximumSize, contentMode: .aspectFit, options: options) { livePhoto, info in
+                if let isDegraded = info?[PHImageResultIsDegradedKey] as? Bool, isDegraded {
+                    return
+                }
                 if let error = info?[PHImageErrorKey] as? Error {
                     continuation.resume(throwing: error)
                 } else if let livePhoto = livePhoto {
                     continuation.resume(returning: livePhoto)
                 } else if let cancelled = info?[PHImageCancelledKey] as? Bool, cancelled {
-                    continuation.resume(throwing: ConversionError.conversionFailed)
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    continuation.resume(throwing: ConversionError.invalidInput)
                 }
             }
         }

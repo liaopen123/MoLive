@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var showingShareSheet = false
     @State private var convertedFileURL: URL?
     @State private var showingDatePicker = false
+    @State private var batchConversionTask: Task<Void, Never>?
     
     var body: some View {
         NavigationView {
@@ -211,6 +212,13 @@ struct ContentView: View {
                             Text("批量转换中... \(Int(conversionState.conversionProgress * 100))%")
                                 .font(.caption2)
                         }
+
+                        Button(role: .cancel) {
+                            batchConversionTask?.cancel()
+                        } label: {
+                            Label("停止批量转换", systemImage: "stop.circle")
+                        }
+                        .buttonStyle(.bordered)
                     }
                     .padding(.horizontal)
                 }
@@ -225,9 +233,18 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .disabled(conversionState.isConverting)
                     
-                    Button(action: {
-                        clearAllTempFiles()
-                    }) {
+                    Menu {
+                        Button("清理转换缓存", systemImage: "trash") {
+                            clearAllTempFiles()
+                        }
+                        Button(role: .destructive) {
+                            conversionState.clearConversionHistory()
+                            alertMessage = "转换历史已清除，下次扫描会重新列出所有 Live Photo。"
+                            showingAlert = true
+                        } label: {
+                            Label("清除转换历史", systemImage: "clock.arrow.circlepath")
+                        }
+                    } label: {
                         Image(systemName: "trash")
                             .foregroundColor(.red)
                     }
@@ -236,11 +253,7 @@ struct ContentView: View {
                     
                     if conversionState.batchAssets.contains(where: { $0.status == .failed }) {
                         Button(action: {
-                            Task {
-                                conversionState.isConverting = true
-                                await BatchConversionManager.shared.startBatchConversion(state: conversionState)
-                                conversionState.isConverting = false
-                            }
+                            startBatchConversion()
                         }) {
                             Label("重试失败项", systemImage: "arrow.clockwise")
                                 .frame(maxWidth: .infinity)
@@ -250,11 +263,7 @@ struct ContentView: View {
                         .disabled(conversionState.isConverting)
                     } else {
                         Button(action: {
-                            Task {
-                                conversionState.isConverting = true
-                                await BatchConversionManager.shared.startBatchConversion(state: conversionState)
-                                conversionState.isConverting = false
-                            }
+                            startBatchConversion()
                         }) {
                             Label("开始批量转换", systemImage: "play.fill")
                                 .frame(maxWidth: .infinity)
@@ -433,6 +442,16 @@ struct ContentView: View {
         } catch {
             alertMessage = "清理失败：\(error.localizedDescription)"
             showingAlert = true
+        }
+    }
+
+    private func startBatchConversion() {
+        batchConversionTask?.cancel()
+        batchConversionTask = Task {
+            conversionState.isConverting = true
+            await BatchConversionManager.shared.startBatchConversion(state: conversionState)
+            conversionState.isConverting = false
+            batchConversionTask = nil
         }
     }
 }
