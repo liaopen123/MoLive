@@ -318,8 +318,7 @@ struct ContentView: View {
     }
     
     private func loadFiles(from urls: [URL]) async {
-        conversionState.selectedPhotos.removeAll()
-        conversionState.selectedURLs.removeAll()
+        conversionState.clearSelectedMedia()
         
         for url in urls {
             let didAccess = url.startAccessingSecurityScopedResource()
@@ -358,8 +357,15 @@ struct ContentView: View {
             return
         }
         
+        // selectedItems 是 PhotosPicker 的当前选择，只清理上次生成的预览和缓存。
+        for url in conversionState.selectedURLs {
+            if url.deletingLastPathComponent().lastPathComponent.hasPrefix("MoLiveSelection_") {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            }
+        }
         conversionState.selectedPhotos.removeAll()
         conversionState.selectedURLs.removeAll()
+        conversionState.validationSummary = nil
         
         for (index, item) in conversionState.selectedItems.enumerated() {
             do {

@@ -6,7 +6,9 @@
 //
 
 import Testing
+import Foundation
 import CoreGraphics
+import AVFoundation
 @testable import MotionJPEGConvert
 
 struct MotionJPEGConvertTests {

@@ -55,7 +55,19 @@ class ConversionState: ObservableObject {
     }
     
     func reset() {
-        // 清理所有选择的临时文件
+        clearSelectedMedia()
+
+        batchAssets.removeAll()
+        conversionProgress = 0
+        validationSummary = nil
+        isConverting = false
+        successCount = 0
+        failedCount = 0
+        skippedCount = 0
+        totalFoundCount = 0
+    }
+
+    func clearSelectedMedia() {
         for url in selectedURLs {
             if url.deletingLastPathComponent().lastPathComponent.hasPrefix("MoLiveSelection_") {
                 try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -67,14 +79,7 @@ class ConversionState: ObservableObject {
         selectedItems.removeAll()
         selectedPhotos.removeAll()
         selectedURLs.removeAll()
-        batchAssets.removeAll()
-        conversionProgress = 0
         validationSummary = nil
-        isConverting = false
-        successCount = 0
-        failedCount = 0
-        skippedCount = 0
-        totalFoundCount = 0
     }
     
     // 历史记录管理
