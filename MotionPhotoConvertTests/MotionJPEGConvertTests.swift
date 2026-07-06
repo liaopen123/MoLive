@@ -86,6 +86,21 @@ struct MotionJPEGConvertTests {
         #expect(!components.usedXMPVideoOffset)
     }
 
+    @Test func containerDirectoryVideoLengthIsParsed() {
+        let xmp = """
+        <Container:Item Item:Mime="video/mp4" Item:Length="4254557" Item:Semantic="MotionPhoto"/>
+        """
+        #expect(Converter.containerMotionPhotoLength(from: Data(xmp.utf8)) == 4_254_557)
+    }
+
+    @Test func modernMotionPhotoPresentationTimestampIsParsed() {
+        let xmp = """
+        <Camera:MotionPhotoPresentationTimestampUs>900000</Camera:MotionPhotoPresentationTimestampUs>
+        """
+        let time = Converter.motionPhotoPresentationTime(fromJPEGData: Data(xmp.utf8))
+        #expect(time?.seconds == 0.9)
+    }
+
     private func makeFtypBox() -> Data {
         Data([
             0x00, 0x00, 0x00, 0x10,

@@ -53,7 +53,7 @@ extension Converter {
         // 创建临时目录
         let tempDirectory = try createTempDirectory(prefix: "LivePhotoConvert")
         let tempJPEGURL = tempDirectory.appendingPathComponent("temp").appendingPathExtension("jpg")
-        let outputURL = tempDirectory.appendingPathComponent("MVIMG_\(UUID().uuidString)").appendingPathExtension("jpg")
+        let outputURL = tempDirectory.appendingPathComponent("MVIMG_\(UUID().uuidString)_MP").appendingPathExtension("jpg")
 
         do {
             // 获取 Live Photo 资源
@@ -195,7 +195,13 @@ extension Converter {
             throw ConversionError.invalidInput
         }
 
-        if let videoLength = microVideoOffset(from: data),
+        let containerLength = containerMotionPhotoLength(from: data)
+        let legacyLength = microVideoOffset(from: data)
+        if let containerLength, let legacyLength, containerLength != legacyLength {
+            throw ConversionError.xmpParsingError("新旧 XMP 中的视频长度不一致")
+        }
+
+        if let videoLength = containerLength ?? legacyLength,
            videoLength > 0,
            videoLength < data.count {
             let videoStart = data.count - videoLength
@@ -234,6 +240,34 @@ extension Converter {
                   let valueRange = Range(match.range(at: 1), in: text),
                   let value = Int(text[valueRange]) else { continue }
             return value
+        }
+        return nil
+    }
+
+    static func containerMotionPhotoLength(from data: Data) -> Int? {
+        let text = String(decoding: data, as: UTF8.self)
+        guard let itemRegex = try? NSRegularExpression(
+            pattern: #"<(?:Container|GContainer):Item\b[^>]*>"#
+        ) else { return nil }
+        let fullRange = NSRange(text.startIndex..., in: text)
+
+        for match in itemRegex.matches(in: text, range: fullRange) {
+            guard let tagRange = Range(match.range, in: text) else { continue }
+            let tag = String(text[tagRange])
+            guard tag.range(
+                of: #"Item:Semantic\s*=\s*[\"']MotionPhoto[\"']"#,
+                options: .regularExpression
+            ) != nil,
+            let lengthRegex = try? NSRegularExpression(
+                pattern: #"Item:Length\s*=\s*[\"'](\d+)[\"']"#
+            ),
+            let lengthMatch = lengthRegex.firstMatch(
+                in: tag,
+                range: NSRange(tag.startIndex..., in: tag)
+            ),
+            let lengthRange = Range(lengthMatch.range(at: 1), in: tag),
+            let length = Int(tag[lengthRange]) else { continue }
+            return length
         }
         return nil
     }
@@ -298,6 +332,8 @@ extension Converter {
     static func motionPhotoPresentationTime(fromJPEGData data: Data) -> CMTime? {
         let text = String(decoding: data, as: UTF8.self)
         let patterns = [
+            #"<(?:GCamera|Camera):MotionPhotoPresentationTimestampUs>\s*(\d+)\s*</(?:GCamera|Camera):MotionPhotoPresentationTimestampUs>"#,
+            #"(?:GCamera|Camera):MotionPhotoPresentationTimestampUs=[\"'](\d+)[\"']"#,
             #"<GCamera:MicroVideoPresentationTimestampUs>\s*(\d+)\s*</GCamera:MicroVideoPresentationTimestampUs>"#,
             #"GCamera:MicroVideoPresentationTimestampUs=[\"'](\d+)[\"']"#
         ]
@@ -479,11 +515,26 @@ extension Converter {
         <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0">
            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
               <rdf:Description rdf:about=""
-                    xmlns:GCamera="http://ns.google.com/photos/1.0/camera/">
+                    xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"
+                    xmlns:Container="http://ns.google.com/photos/1.0/container/"
+                    xmlns:Item="http://ns.google.com/photos/1.0/container/item/">
+                 <GCamera:MotionPhoto>1</GCamera:MotionPhoto>
+                 <GCamera:MotionPhotoVersion>1</GCamera:MotionPhotoVersion>
+                 <GCamera:MotionPhotoPresentationTimestampUs>\(presentationTimestampUs)</GCamera:MotionPhotoPresentationTimestampUs>
                  <GCamera:MicroVideo>1</GCamera:MicroVideo>
                  <GCamera:MicroVideoVersion>1</GCamera:MicroVideoVersion>
                  <GCamera:MicroVideoOffset>\(offset)</GCamera:MicroVideoOffset>
                  <GCamera:MicroVideoPresentationTimestampUs>\(presentationTimestampUs)</GCamera:MicroVideoPresentationTimestampUs>
+                 <Container:Directory>
+                    <rdf:Seq>
+                       <rdf:li rdf:parseType="Resource">
+                          <Container:Item Item:Mime="image/jpeg" Item:Semantic="Primary" Item:Length="0" Item:Padding="0"/>
+                       </rdf:li>
+                       <rdf:li rdf:parseType="Resource">
+                          <Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="\(offset)"/>
+                       </rdf:li>
+                    </rdf:Seq>
+                 </Container:Directory>
               </rdf:Description>
            </rdf:RDF>
         </x:xmpmeta>
