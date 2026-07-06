@@ -56,10 +56,11 @@ extension Converter {
                 try? FileManager.default.removeItem(at: videoURL)
             }
 
-            // 读取照片数据和属性
+            // 读取照片数据和属性。CGImage 不会自动应用 EXIF Orientation，
+            // 因此在转成 JPEG 时将方向烘焙进像素，避免 Android 相册忽略方向标记。
             guard let imageSource = CGImageSourceCreateWithURL(photoURL as CFURL, nil),
-                  let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
-                  let imageRef = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+                  var imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+                  let imageRef = createOrientationNormalizedImage(from: imageSource, properties: imageProperties) else {
                 throw ConversionError.conversionFailed
             }
 
@@ -74,6 +75,10 @@ extension Converter {
             }
 
             // 合并原始属性和压缩质量设置
+            imageProperties[kCGImagePropertyOrientation as String] = 1
+            var tiffProperties = imageProperties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+            tiffProperties[kCGImagePropertyTIFFOrientation as String] = 1
+            imageProperties[kCGImagePropertyTIFFDictionary as String] = tiffProperties
             var finalProperties = imageProperties
             finalProperties[kCGImageDestinationLossyCompressionQuality as String] = 1.0
 
@@ -223,7 +228,8 @@ extension Converter {
         let model = tiffDict[kCGImagePropertyTIFFModel as String] as? String ?? "iPhone"
         let software = tiffDict[kCGImagePropertyTIFFSoftware as String] as? String ?? "iOS"
         let dateTime = tiffDict[kCGImagePropertyTIFFDateTime as String] as? String ?? ""
-        let orientation = tiffDict[kCGImagePropertyTIFFOrientation as? String ?? "Orientation"] as? UInt16 ?? 1
+        // 图像在上一步已经将方向烘焙进像素，输出文件必须统一为 top-left。
+        let orientation: UInt16 = 1
         
         // 提取 GPS 信息
         let gpsDict = metadata[kCGImagePropertyGPSDictionary as String] as? [String: Any] ?? [:]
@@ -399,6 +405,27 @@ extension Converter {
 
     private func packUInt16(_ value: UInt16) -> [UInt8] {
         return [UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)]
+    }
+
+    private func createOrientationNormalizedImage(
+        from source: CGImageSource,
+        properties: [String: Any]
+    ) -> CGImage? {
+        let width = properties[kCGImagePropertyPixelWidth as String] as? Int ?? 0
+        let height = properties[kCGImagePropertyPixelHeight as String] as? Int ?? 0
+        let maximumPixelSize = max(width, height)
+
+        guard maximumPixelSize > 0 else {
+            return nil
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     private func packUInt32(_ value: UInt32) -> [UInt8] {

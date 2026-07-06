@@ -71,6 +71,15 @@ extension Converter {
         
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration)
+        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ConversionError.invalidInput
+        }
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let preferredTransform = try await videoTrack.load(.preferredTransform)
+        let (renderSize, renderTransform) = Self.normalizedVideoGeometry(
+            naturalSize: naturalSize,
+            preferredTransform: preferredTransform
+        )
         
         // 创建临时输出路径
         let tempOutputURL = FileManager.default.temporaryDirectory
@@ -78,15 +87,30 @@ extension Converter {
             .appendingPathExtension("mp4")
         
         // 创建导出会话
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+        // Passthrough 只保留旋转矩阵，部分 Android 相册会忽略它。
+        // 这里通过 videoComposition 将方向真正烘焙进视频帧。
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
             throw ConversionError.videoCreationFailed
         }
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(nominalFrameRate.rounded(), 30)))
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+        layerInstruction.setTransform(renderTransform, at: .zero)
+        instruction.layerInstructions = [layerInstruction]
+        videoComposition.instructions = [instruction]
         
         // 设置导出参数
         exportSession.outputURL = tempOutputURL
         exportSession.outputFileType = .mp4
         exportSession.shouldOptimizeForNetworkUse = true
         exportSession.timeRange = CMTimeRange(start: .zero, duration: duration)
+        exportSession.videoComposition = videoComposition
         
         print("开始转码视频...")
         // 执行导出
@@ -101,6 +125,25 @@ extension Converter {
         try? FileManager.default.removeItem(at: tempOutputURL)
         
         return videoData
+    }
+
+    /// 计算旋转后的显示尺寸，并将画面平移到以 (0, 0) 为原点的正坐标区域。
+    /// 使用 bounding box 而不是枚举 0/90/180/270 度，可同时处理镜像和非标准矩阵。
+    static func normalizedVideoGeometry(
+        naturalSize: CGSize,
+        preferredTransform: CGAffineTransform
+    ) -> (renderSize: CGSize, transform: CGAffineTransform) {
+        let sourceRect = CGRect(origin: .zero, size: naturalSize)
+        let transformedRect = sourceRect.applying(preferredTransform)
+        let renderSize = CGSize(
+            width: abs(transformedRect.width).rounded(.up),
+            height: abs(transformedRect.height).rounded(.up)
+        )
+        let translation = CGAffineTransform(
+            translationX: -transformedRect.minX,
+            y: -transformedRect.minY
+        )
+        return (renderSize, preferredTransform.concatenating(translation))
     }
     
     func getPairedVideoURL(for photoURL: URL) async throws -> URL {
@@ -129,4 +172,4 @@ extension Converter {
         
         throw ConversionError.invalidInput
     }
-} 
+}
