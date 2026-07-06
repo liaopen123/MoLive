@@ -126,6 +126,7 @@ extension Converter {
 
             // 附加视频数据并写入最终文件
             finalData.append(videoData)
+            _ = try Self.motionPhotoComponents(from: finalData)
             print("最终文件大小: \(finalData.count) 字节")
             try finalData.write(to: outputURL)
             
@@ -144,60 +145,8 @@ extension Converter {
     private func separateImageAndVideo(from data: Data, photoURL: URL, videoURL: URL) async throws -> CMTime {
         print("开始分离图片和视频数据...")
         
-        // 首先验证文件头是否为JPEG
-        guard data.count >= 2 && data[0] == 0xFF && data[1] == 0xD8 else {
-            throw ConversionError.invalidInput
-        }
-        
-        // 查找第一个完整的JPEG图像
-        var imageEndIndex = 0
-        var i = 2
-        var segments: [(start: Int, length: Int)] = []
-        
-        while i < data.count - 1 {
-            guard data[i] == 0xFF else {
-                i += 1
-                continue
-            }
-            
-            let marker = data[i + 1]
-            
-            // 如果是EOI标记（0xD9），说明找到了JPEG结束
-            if marker == 0xD9 {
-                imageEndIndex = i + 2
-                break
-            }
-            
-            // 如果是SOI标记（0xD8），说明找到了新的JPEG始
-            if marker == 0xD8 {
-                i += 2
-                continue
-            }
-            
-            // 如果是其他段标记
-            if marker >= 0xE0 && marker <= 0xEF || // APP segments
-               marker == 0xFE || // COM segment
-               marker == 0xDB || // DQT segment
-               marker == 0xC0 || marker == 0xC2 || // SOF segments
-               marker == 0xC4 { // DHT segment
-                
-                if i + 3 < data.count {
-                    let length = Int(data[i + 2]) << 8 | Int(data[i + 3])
-                    segments.append((start: i, length: length + 2))
-                    i += length + 2
-                    continue
-                }
-            }
-            
-            i += 1
-        }
-        
-        guard imageEndIndex > 0 else {
-            throw ConversionError.invalidInput
-        }
-        
-        // 提取图片数据
-        let imageData = data.prefix(imageEndIndex)
+        let components = try Self.motionPhotoComponents(from: data)
+        let imageData = components.jpegData
         
         // 验证提取的图片数据
         if let image = UIImage(data: imageData) {
@@ -214,27 +163,136 @@ extension Converter {
             }
         }
         
-        // 查找视频数据的起始位置
-        var videoStartIndex = imageEndIndex
-        while videoStartIndex < data.count - 4 {
-            // 检查常见的视频文件头
-            if data[videoStartIndex..<min(videoStartIndex + 4, data.count)].elementsEqual([0x00, 0x00, 0x00, 0x18]) ||  // MOV
-               data[videoStartIndex..<min(videoStartIndex + 4, data.count)].elementsEqual([0x66, 0x74, 0x79, 0x70]) {   // MP4
-                break
-            }
-            videoStartIndex += 1
-        }
-        
-        guard videoStartIndex < data.count - 4 else {
-            throw ConversionError.invalidInput
-        }
-        
-        let videoData = data.suffix(from: videoStartIndex)
-        
         // 保存分离的数据
         try imageData.write(to: photoURL, options: [.atomic])
-        try videoData.write(to: videoURL, options: [.atomic])
-        return Self.motionPhotoPresentationTime(fromJPEGData: Data(imageData)) ?? .invalid
+        try components.videoData.write(to: videoURL, options: [.atomic])
+        let presentationTime = Self.motionPhotoPresentationTime(fromJPEGData: imageData) ?? .invalid
+        let videoAsset = AVURLAsset(url: videoURL)
+        let duration = try await videoAsset.load(.duration)
+        guard duration.isNumeric,
+              duration.seconds > 0,
+              !(try await videoAsset.loadTracks(withMediaType: .video)).isEmpty else {
+            throw ConversionError.invalidInput
+        }
+        if presentationTime.isNumeric,
+           (presentationTime < .zero || presentationTime > duration) {
+            throw ConversionError.xmpParsingError("展示帧时间超出视频范围")
+        }
+        return presentationTime
+    }
+
+    struct MotionPhotoComponents {
+        let jpegData: Data
+        let videoData: Data
+        let videoStartOffset: Int
+        let usedXMPVideoOffset: Bool
+    }
+
+    /// 优先使用 XMP 中“从文件尾部计算”的视频长度。
+    /// 旧文件缺少 offset 时，才从完整 JPEG EOI 之后扫描 ISO BMFF ftyp box。
+    static func motionPhotoComponents(from data: Data) throws -> MotionPhotoComponents {
+        guard let jpegEnd = jpegEndOffset(in: data) else {
+            throw ConversionError.invalidInput
+        }
+
+        if let videoLength = microVideoOffset(from: data),
+           videoLength > 0,
+           videoLength < data.count {
+            let videoStart = data.count - videoLength
+            guard videoStart >= jpegEnd,
+                  isISOBaseMediaFile(data, at: videoStart) else {
+                throw ConversionError.xmpParsingError("视频 offset 与文件结构不匹配")
+            }
+            return MotionPhotoComponents(
+                jpegData: data.subdata(in: 0..<jpegEnd),
+                videoData: data.subdata(in: videoStart..<data.count),
+                videoStartOffset: videoStart,
+                usedXMPVideoOffset: true
+            )
+        }
+
+        guard let videoStart = firstISOBaseMediaOffset(in: data, startingAt: jpegEnd) else {
+            throw ConversionError.invalidInput
+        }
+        return MotionPhotoComponents(
+            jpegData: data.subdata(in: 0..<jpegEnd),
+            videoData: data.subdata(in: videoStart..<data.count),
+            videoStartOffset: videoStart,
+            usedXMPVideoOffset: false
+        )
+    }
+
+    static func microVideoOffset(from data: Data) -> Int? {
+        let text = String(decoding: data, as: UTF8.self)
+        let patterns = [
+            #"<GCamera:MicroVideoOffset>\s*(\d+)\s*</GCamera:MicroVideoOffset>"#,
+            #"GCamera:MicroVideoOffset=[\"'](\d+)[\"']"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let valueRange = Range(match.range(at: 1), in: text),
+                  let value = Int(text[valueRange]) else { continue }
+            return value
+        }
+        return nil
+    }
+
+    private static func jpegEndOffset(in data: Data) -> Int? {
+        guard data.count >= 4, data[0] == 0xFF, data[1] == 0xD8 else { return nil }
+        var index = 2
+        var insideScanData = false
+
+        while index + 1 < data.count {
+            guard data[index] == 0xFF else {
+                index += 1
+                continue
+            }
+            var markerIndex = index + 1
+            while markerIndex < data.count, data[markerIndex] == 0xFF { markerIndex += 1 }
+            guard markerIndex < data.count else { return nil }
+            let marker = data[markerIndex]
+
+            if marker == 0xD9 { return markerIndex + 1 }
+            if insideScanData {
+                if marker == 0x00 || (0xD0...0xD7).contains(marker) {
+                    index = markerIndex + 1
+                    continue
+                }
+                // 渐进式 JPEG 可以在多个 scan 之间出现新的段。
+                insideScanData = false
+            }
+
+            if marker == 0xD8 || marker == 0x01 || (0xD0...0xD7).contains(marker) {
+                index = markerIndex + 1
+                continue
+            }
+            guard markerIndex + 2 < data.count else { return nil }
+            let length = Int(data[markerIndex + 1]) << 8 | Int(data[markerIndex + 2])
+            guard length >= 2, markerIndex + length < data.count else { return nil }
+            index = markerIndex + 1 + length
+            if marker == 0xDA { insideScanData = true }
+        }
+        return nil
+    }
+
+    private static func firstISOBaseMediaOffset(in data: Data, startingAt offset: Int) -> Int? {
+        guard offset < data.count else { return nil }
+        for candidate in offset..<max(offset, data.count - 7) {
+            if isISOBaseMediaFile(data, at: candidate) { return candidate }
+        }
+        return nil
+    }
+
+    private static func isISOBaseMediaFile(_ data: Data, at offset: Int) -> Bool {
+        guard offset >= 0, offset + 12 <= data.count else { return false }
+        let boxSize = Int(data[offset]) << 24 |
+            Int(data[offset + 1]) << 16 |
+            Int(data[offset + 2]) << 8 |
+            Int(data[offset + 3])
+        let hasFtyp = data[offset + 4] == 0x66 && data[offset + 5] == 0x74 &&
+            data[offset + 6] == 0x79 && data[offset + 7] == 0x70
+        return hasFtyp && (boxSize == 0 || (boxSize >= 12 && offset + boxSize <= data.count))
     }
 
     static func motionPhotoPresentationTime(fromJPEGData data: Data) -> CMTime? {

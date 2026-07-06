@@ -59,4 +59,40 @@ struct MotionJPEGConvertTests {
         #expect(time?.seconds == 1.5)
     }
 
+    @Test func motionPhotoUsesXMPVideoOffset() throws {
+        let video = makeFtypBox()
+        let xmp = "<GCamera:MicroVideoOffset>\(video.count)</GCamera:MicroVideoOffset>"
+        var jpeg = Data([0xFF, 0xD8, 0xFF, 0xE1])
+        let segmentLength = UInt16(xmp.utf8.count + 2)
+        jpeg.append(UInt8(segmentLength >> 8))
+        jpeg.append(UInt8(segmentLength & 0xFF))
+        jpeg.append(Data(xmp.utf8))
+        jpeg.append(contentsOf: [0xFF, 0xD9])
+
+        let components = try Converter.motionPhotoComponents(from: jpeg + video)
+        #expect(components.jpegData == jpeg)
+        #expect(components.videoData == video)
+        #expect(components.usedXMPVideoOffset)
+    }
+
+    @Test func motionPhotoFallsBackToFtypAfterJPEG() throws {
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let padding = Data([0, 0, 0, 0])
+        let video = makeFtypBox()
+        let components = try Converter.motionPhotoComponents(from: jpeg + padding + video)
+
+        #expect(components.jpegData == jpeg)
+        #expect(components.videoData == video)
+        #expect(!components.usedXMPVideoOffset)
+    }
+
+    private func makeFtypBox() -> Data {
+        Data([
+            0x00, 0x00, 0x00, 0x10,
+            0x66, 0x74, 0x79, 0x70,
+            0x69, 0x73, 0x6F, 0x6D,
+            0x00, 0x00, 0x00, 0x00
+        ])
+    }
+
 }

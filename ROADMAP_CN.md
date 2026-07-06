@@ -18,7 +18,7 @@ MoLive 的目标不只是“能生成文件”，而是在 iOS 上可靠地迁�
 - [x] 将 Live Photo 的 `com.apple.quicktime.still-image-time` 写入配对视频。
 - [x] 从原 Live Photo 读取展示帧时间，写入 `MicroVideoPresentationTimestampUs`。
 - [x] Motion Photo 反向转换时保留视频音轨。
-- [ ] 按 XMP offset 分离视频，JPEG EOI / ISO BMFF box 扫描仅作降级方案。
+- [x] 按 XMP offset 分离视频，JPEG EOI / ISO BMFF box 扫描仅作降级方案。
 - [ ] 生成较新的 Google Motion Photo Container XMP，同时保留 GCamera 兼容字段。
 - [ ] 实现生成后验证器：JPEG、XMP、offset、MP4 box、时长和展示帧。
 
