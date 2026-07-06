@@ -8,6 +8,8 @@
 
 MoLive 是一个 iOS 应用程序，专门用于 小米动态照片 和 Live Photo 之间的相互转换。它提供了简洁的用户界面和便捷的转换功能。
 
+> 后续开发计划请查看 [路线图](ROADMAP_CN.md)。
+
 [screenshot](image.png)
 
 ### ✅ 已实现功能

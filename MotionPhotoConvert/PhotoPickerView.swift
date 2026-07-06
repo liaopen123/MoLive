@@ -71,11 +71,16 @@ struct PhotoPickerView: View {
         conversionState.selectedPhotos.remove(at: index)
         if index < conversionState.selectedURLs.count {
             // 删除临时文件
-            try? FileManager.default.removeItem(at: conversionState.selectedURLs[index])
+            let url = conversionState.selectedURLs[index]
+            if url.deletingLastPathComponent().lastPathComponent.hasPrefix("MoLiveSelection_") {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            } else if url.isFileURL && url.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
             conversionState.selectedURLs.remove(at: index)
         }
         if index < conversionState.selectedItems.count {
             conversionState.selectedItems.remove(at: index)
         }
     }
-} 
+}

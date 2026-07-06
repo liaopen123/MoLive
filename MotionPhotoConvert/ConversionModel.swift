@@ -56,7 +56,11 @@ class ConversionState: ObservableObject {
     func reset() {
         // 清理所有选择的临时文件
         for url in selectedURLs {
-            try? FileManager.default.removeItem(at: url)
+            if url.deletingLastPathComponent().lastPathComponent.hasPrefix("MoLiveSelection_") {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            } else if url.isFileURL && url.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
         
         selectedItems.removeAll()

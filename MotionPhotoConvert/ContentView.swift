@@ -299,11 +299,22 @@ struct ContentView: View {
         conversionState.selectedURLs.removeAll()
         
         for url in urls {
-            guard let data = try? Data(contentsOf: url),
-                  let image = UIImage(data: data) else { continue }
-            
-            conversionState.selectedPhotos.append(image)
-            conversionState.selectedURLs.append(url)
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if didAccess { url.stopAccessingSecurityScopedResource() }
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                guard let image = UIImage(data: data) else { continue }
+                let selectionDirectory = try Converter.shared.createTempDirectory(prefix: "MoLiveSelection")
+                let copiedURL = selectionDirectory.appendingPathComponent(url.lastPathComponent)
+                try data.write(to: copiedURL, options: .atomic)
+                conversionState.selectedPhotos.append(image)
+                conversionState.selectedURLs.append(copiedURL)
+            } catch {
+                print("导入文件失败 \(url.lastPathComponent)：\(error.localizedDescription)")
+            }
         }
     }
     
@@ -333,7 +344,8 @@ struct ContentView: View {
                     conversionState.selectedPhotos.append(image)
                     
                     // 创建临时文件
-                    let tempURL = FileManager.default.temporaryDirectory
+                    let selectionDirectory = try Converter.shared.createTempDirectory(prefix: "MoLiveSelection")
+                    let tempURL = selectionDirectory
                         .appendingPathComponent(UUID().uuidString)
                         .appendingPathExtension("jpg")
                     try data.write(to: tempURL)
@@ -395,9 +407,10 @@ struct ContentView: View {
     
     private func clearAllTempFiles() {
         let tempDir = FileManager.default.temporaryDirectory
+        let ownedPrefixes = ["LivePhotoConvert_", "MotionJPEGConvert_", "LivePhotoTemp_", "MoLiveSelection_"]
         do {
             let files = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
-            for file in files {
+            for file in files where ownedPrefixes.contains(where: file.lastPathComponent.hasPrefix) {
                 try? FileManager.default.removeItem(at: file)
             }
             alertMessage = "缓存清理成功！已释放存储空间。"

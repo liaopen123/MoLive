@@ -97,11 +97,14 @@ extension Converter {
             // 合并数据
             var finalData = try Data(contentsOf: photoWithMetadata)
             
-            // 确保JPEG文件结构完整
-            if finalData.count >= 2 && finalData[finalData.count - 2] == 0xFF && finalData[finalData.count - 1] == 0xD9 {
-                finalData.removeLast(2)
+            // Motion Photo 是“完整 JPEG + 视频”。EOI (FF D9) 必须保留，
+            // 否则严格的 JPEG 解码器会将文件判定为损坏。
+            guard finalData.count >= 2,
+                  finalData[finalData.count - 2] == 0xFF,
+                  finalData[finalData.count - 1] == 0xD9 else {
+                throw ConversionError.conversionFailed
             }
-            
+
             // 附加视频数据并写入最终文件
             finalData.append(videoData)
             print("最终文件大小: \(finalData.count) 字节")

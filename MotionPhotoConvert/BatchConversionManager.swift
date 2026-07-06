@@ -126,6 +126,7 @@ class BatchConversionManager: ObservableObject {
         case .failure(let error):
             state.batchAssets[index].status = .failed
             state.batchAssets[index].error = error.localizedDescription
+            state.failedCount += 1
         }
         
         if abs(state.conversionProgress - progress) > 0.01 || progress >= 1.0 {

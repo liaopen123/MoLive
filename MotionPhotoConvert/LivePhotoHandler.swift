@@ -190,64 +190,54 @@ extension Converter {
         let videoURL = tempDirectory.appendingPathComponent("video.mov")
         
         let resources = PHAssetResource.assetResources(for: livePhoto)
-        
-        if resources.isEmpty {
+        guard let photoResource = preferredResource(in: resources, types: [.photo, .fullSizePhoto]),
+              let videoResource = preferredResource(in: resources, types: [.pairedVideo, .fullSizePairedVideo]) else {
+            try? FileManager.default.removeItem(at: tempDirectory)
             throw ConversionError.invalidInput
         }
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            let resourceManager = PHAssetResourceManager.default()
-            let group = DispatchGroup()
-            var error: Error?
-            var completedResources = Set<PHAssetResourceType>()
-            
-            for resource in resources {
-                group.enter()
-                let targetURL = resource.type == .photo ? photoURL : videoURL
-                print("正在处理资源：\(resource.type.rawValue)")
-                
-                let options = PHAssetResourceRequestOptions()
-                options.isNetworkAccessAllowed = true
-                
-                // 确保目标文件的父目录存在
-                try? FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(),
-                                                       withIntermediateDirectories: true)
-                
-                // 如果文件已存在，先删除
-                try? FileManager.default.removeItem(at: targetURL)
-                
-                resourceManager.writeData(for: resource, toFile: targetURL, options: options) { writeError in
-                    defer { group.leave() }
-                    
-                    if let writeError = writeError {
-                        error = writeError
-                        print("写入资源失败：\(writeError.localizedDescription)")
-                    } else {
-                        // 验证文件是否成功创建
-                        if FileManager.default.fileExists(atPath: targetURL.path) {
-                            completedResources.insert(resource.type)
-                            print("成功写入资源：\(resource.type.rawValue)")
-                        } else {
-                            error = ConversionError.conversionFailed
-                            print("文件写入失败：文件不存在")
-                        }
-                    }
-                }
+
+        do {
+            async let photoWrite: Void = writeResource(photoResource, to: photoURL)
+            async let videoWrite: Void = writeResource(videoResource, to: videoURL)
+            _ = try await (photoWrite, videoWrite)
+            return (photoURL, videoURL)
+        } catch {
+            try? FileManager.default.removeItem(at: tempDirectory)
+            throw error
+        }
+    }
+
+    private func preferredResource(
+        in resources: [PHAssetResource],
+        types: [PHAssetResourceType]
+    ) -> PHAssetResource? {
+        for type in types {
+            if let resource = resources.first(where: { $0.type == type }) {
+                return resource
             }
-            
-            group.notify(queue: .main) {
-                if let error = error {
-                    // 清理临时文件
-                    try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        return nil
+    }
+
+    private func writeResource(_ resource: PHAssetResource, to targetURL: URL) async throws {
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        try? FileManager.default.removeItem(at: targetURL)
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().writeData(
+                for: resource,
+                toFile: targetURL,
+                options: options
+            ) { error in
+                if let error {
                     continuation.resume(throwing: error)
-                } else if !completedResources.contains(.photo) || !completedResources.contains(.pairedVideo) {
-                    // 清理临时文件
-                    try? FileManager.default.removeItem(at: tempDirectory)
-                    continuation.resume(throwing: ConversionError.invalidInput)
+                } else if FileManager.default.fileExists(atPath: targetURL.path) {
+                    continuation.resume()
                 } else {
-                    continuation.resume(returning: (photoURL, videoURL))
+                    continuation.resume(throwing: ConversionError.conversionFailed)
                 }
             }
         }
     }
-} 
+}
