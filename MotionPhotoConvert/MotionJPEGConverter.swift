@@ -50,49 +50,67 @@ extension Converter {
     func convertLivePhotoToMotionJPEG(from livePhoto: PHLivePhoto) async throws -> URL {
         print("开始转换 Live Photo...")
 
+        let resources = try await getLivePhotoResources(from: livePhoto)
+        defer { try? FileManager.default.removeItem(at: resources.photoURL.deletingLastPathComponent()) }
+        return try await convertLivePhotoResources(
+            photoURL: resources.photoURL,
+            videoURL: resources.videoURL
+        )
+    }
+
+    func convertLivePhotoToMotionJPEG(from asset: PHAsset) async throws -> URL {
+        let resources = try await getLivePhotoResources(from: asset)
+        defer { try? FileManager.default.removeItem(at: resources.photoURL.deletingLastPathComponent()) }
+        return try await convertLivePhotoResources(
+            photoURL: resources.photoURL,
+            videoURL: resources.videoURL
+        )
+    }
+
+    private func convertLivePhotoResources(photoURL: URL, videoURL: URL) async throws -> URL {
         // 创建临时目录
         let tempDirectory = try createTempDirectory(prefix: "LivePhotoConvert")
         let tempJPEGURL = tempDirectory.appendingPathComponent("temp").appendingPathExtension("jpg")
         let outputURL = tempDirectory.appendingPathComponent("MVIMG_\(UUID().uuidString)_MP").appendingPathExtension("jpg")
 
         do {
-            // 获取 Live Photo 资源
-            let (photoURL, videoURL) = try await getLivePhotoResources(from: livePhoto)
-            defer {
-                // 清理资源文件
-                try? FileManager.default.removeItem(at: photoURL)
-                try? FileManager.default.removeItem(at: videoURL)
-            }
-
             // 读取照片数据和属性。CGImage 不会自动应用 EXIF Orientation，
             // 因此在转成 JPEG 时将方向烘焙进像素，避免 Android 相册忽略方向标记。
             guard let imageSource = CGImageSourceCreateWithURL(photoURL as CFURL, nil),
-                  var imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
-                  let imageRef = createOrientationNormalizedImage(from: imageSource, properties: imageProperties) else {
+                  var imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
                 throw ConversionError.conversionFailed
             }
 
-            // 将图像转换为高质量JPEG，保留原始属性
-            guard let destination = CGImageDestinationCreateWithURL(
-                tempJPEGURL as CFURL,
-                UTType.jpeg.identifier as CFString,
-                1,
-                nil
-            ) else {
-                throw ConversionError.conversionFailed
-            }
+            let sourceOrientation = (imageProperties[kCGImagePropertyOrientation as String] as? NSNumber)?.intValue ?? 1
+            let sourceIsJPEG = CGImageSourceGetType(imageSource) as String? == UTType.jpeg.identifier
+            if sourceIsJPEG && sourceOrientation == 1 {
+                // 原图已是正向 JPEG：直接复制压缩数据，像素完全无损。
+                try FileManager.default.copyItem(at: photoURL, to: tempJPEGURL)
+            } else {
+                guard let imageRef = createOrientationNormalizedImage(
+                    from: imageSource,
+                    properties: imageProperties
+                ),
+                let destination = CGImageDestinationCreateWithURL(
+                    tempJPEGURL as CFURL,
+                    UTType.jpeg.identifier as CFString,
+                    1,
+                    nil
+                ) else {
+                    throw ConversionError.conversionFailed
+                }
 
-            // 合并原始属性和压缩质量设置
-            imageProperties[kCGImagePropertyOrientation as String] = 1
-            var tiffProperties = imageProperties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
-            tiffProperties[kCGImagePropertyTIFFOrientation as String] = 1
-            imageProperties[kCGImagePropertyTIFFDictionary as String] = tiffProperties
-            var finalProperties = imageProperties
-            finalProperties[kCGImageDestinationLossyCompressionQuality as String] = 1.0
+                imageProperties[kCGImagePropertyOrientation as String] = 1
+                var tiffProperties = imageProperties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+                tiffProperties[kCGImagePropertyTIFFOrientation as String] = 1
+                imageProperties[kCGImagePropertyTIFFDictionary as String] = tiffProperties
+                var finalProperties = imageProperties
+                finalProperties[kCGImageDestinationLossyCompressionQuality as String] = 1.0
 
-            CGImageDestinationAddImage(destination, imageRef, finalProperties as CFDictionary)
-            guard CGImageDestinationFinalize(destination) else {
-                throw ConversionError.conversionFailed
+                CGImageDestinationAddImage(destination, imageRef, finalProperties as CFDictionary)
+                guard CGImageDestinationFinalize(destination) else {
+                    throw ConversionError.conversionFailed
+                }
             }
 
             // 处理视频数据
@@ -113,23 +131,26 @@ extension Converter {
                 presentationTimestampUs: presentationTimestampUs
             )
             
-            // 合并数据
-            var finalData = try Data(contentsOf: photoWithMetadata)
-            
+            let photoData = try Data(contentsOf: photoWithMetadata, options: .mappedIfSafe)
             // Motion Photo 是“完整 JPEG + 视频”。EOI (FF D9) 必须保留，
             // 否则严格的 JPEG 解码器会将文件判定为损坏。
-            guard finalData.count >= 2,
-                  finalData[finalData.count - 2] == 0xFF,
-                  finalData[finalData.count - 1] == 0xD9 else {
+            guard photoData.count >= 2,
+                  photoData[photoData.count - 2] == 0xFF,
+                  photoData[photoData.count - 1] == 0xD9 else {
                 throw ConversionError.conversionFailed
             }
 
-            // 附加视频数据并写入最终文件
-            finalData.append(videoData)
-            let validation = try await Self.validateMotionPhoto(data: finalData)
+            // 流式生成最终文件，避免再创建一份“JPEG + 整段视频”的大 Data。
+            try FileManager.default.copyItem(at: photoWithMetadata, to: outputURL)
+            let outputHandle = try FileHandle(forWritingTo: outputURL)
+            defer { try? outputHandle.close() }
+            try outputHandle.seekToEnd()
+            try outputHandle.write(contentsOf: videoData)
+
+            let mappedOutput = try Data(contentsOf: outputURL, options: .mappedIfSafe)
+            let validation = try await Self.validateMotionPhoto(data: mappedOutput)
             print("验证通过：\(validation.summary)")
-            print("最终文件大小: \(finalData.count) 字节")
-            try finalData.write(to: outputURL)
+            print("最终文件大小: \(mappedOutput.count) 字节")
             
             // 清理中间临时文件
             try? FileManager.default.removeItem(at: tempJPEGURL)
@@ -440,7 +461,7 @@ extension Converter {
         // 1. 读取原始数据并提取 iPhone 基础元数据
         let imageData = try Data(contentsOf: url)
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
-              let imageRef = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),
+              CGImageSourceCreateImageAtIndex(imageSource, 0, nil) != nil,
               let metadata = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
             throw ConversionError.conversionFailed
         }
@@ -456,24 +477,12 @@ extension Converter {
         // 提取 GPS 信息
         let gpsDict = metadata[kCGImagePropertyGPSDictionary as String] as? [String: Any] ?? [:]
 
-        // 2. 生成不带任何元数据的纯净 JPEG 图像主体
+        // 2. 直接复用已经完成方向归一化的 JPEG 像素数据。
+        // 旧实现会在这里再解码/编码一次，既慢又会产生第二次有损压缩。
         let outputURL = url.deletingLastPathComponent()
             .appendingPathComponent("MVIMG_\(UUID().uuidString)")
             .appendingPathExtension("jpg")
-
-        guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-            throw ConversionError.conversionFailed
-        }
-        // 使用空的元数据字典写入，并确保移除 alpha 通道以解决内存警告
-        let options: [String: Any] = [
-            kCGImageDestinationLossyCompressionQuality as String: 1.0,
-            kCGImagePropertyHasAlpha as String: false
-        ]
-        CGImageDestinationAddImage(destination, imageRef, options as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else {
-            throw ConversionError.conversionFailed
-        }
-        let pureImageData = try Data(contentsOf: outputURL)
+        let pureImageData = try Self.removingExistingExifAndXMP(from: imageData)
 
         // 3. 构建 EXIF 段 (APP1)
         var exifData = Data()
@@ -639,6 +648,50 @@ extension Converter {
         }
 
         return outputURL
+    }
+
+    /// 移除旧 EXIF/XMP APP1 段，但不触碰 JPEG 压缩像素。
+    /// 其他 APP 段（如 ICC profile）会原样保留。
+    static func removingExistingExifAndXMP(from jpeg: Data) throws -> Data {
+        guard jpeg.count >= 4, jpeg[0] == 0xFF, jpeg[1] == 0xD8 else {
+            throw ConversionError.invalidInput
+        }
+        var output = Data(jpeg.prefix(2))
+        var index = 2
+
+        while index + 1 < jpeg.count {
+            guard jpeg[index] == 0xFF else {
+                throw ConversionError.invalidInput
+            }
+            let marker = jpeg[index + 1]
+            if marker == 0xDA || marker == 0xD9 {
+                output.append(jpeg.suffix(from: index))
+                return output
+            }
+            if marker == 0xD8 || marker == 0x01 || (0xD0...0xD7).contains(marker) {
+                output.append(contentsOf: [0xFF, marker])
+                index += 2
+                continue
+            }
+            guard index + 3 < jpeg.count else { throw ConversionError.invalidInput }
+            let length = Int(jpeg[index + 2]) << 8 | Int(jpeg[index + 3])
+            let segmentEnd = index + 2 + length
+            guard length >= 2, segmentEnd <= jpeg.count else { throw ConversionError.invalidInput }
+
+            var shouldRemove = false
+            if marker == 0xE1 {
+                let payloadStart = index + 4
+                let payload = jpeg[payloadStart..<segmentEnd]
+                let exifHeader = Data("Exif\0\0".utf8)
+                let xmpHeader = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+                shouldRemove = payload.starts(with: exifHeader) || payload.starts(with: xmpHeader)
+            }
+            if !shouldRemove {
+                output.append(jpeg[index..<segmentEnd])
+            }
+            index = segmentEnd
+        }
+        throw ConversionError.invalidInput
     }
 
     private func packUInt16(_ value: UInt16) -> [UInt8] {

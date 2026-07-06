@@ -306,13 +306,20 @@ extension Converter {
     
     func getLivePhotoResources(from livePhoto: PHLivePhoto) async throws -> (photoURL: URL, videoURL: URL) {
         print("开始获取 Live Photo 资源...")
-        
-        // 使用 FileManager 的临时目录
+        return try await writeLivePhotoResources(PHAssetResource.assetResources(for: livePhoto))
+    }
+
+    func getLivePhotoResources(from asset: PHAsset) async throws -> (photoURL: URL, videoURL: URL) {
+        try await writeLivePhotoResources(PHAssetResource.assetResources(for: asset))
+    }
+
+    private func writeLivePhotoResources(
+        _ resources: [PHAssetResource]
+    ) async throws -> (photoURL: URL, videoURL: URL) {
         let tempDirectory = try createTempDirectory(prefix: "LivePhotoTemp")
         let photoURL = tempDirectory.appendingPathComponent("photo.jpg")
         let videoURL = tempDirectory.appendingPathComponent("video.mov")
-        
-        let resources = PHAssetResource.assetResources(for: livePhoto)
+
         guard let photoResource = preferredResource(in: resources, types: [.photo, .fullSizePhoto]),
               let videoResource = preferredResource(in: resources, types: [.pairedVideo, .fullSizePairedVideo]) else {
             try? FileManager.default.removeItem(at: tempDirectory)

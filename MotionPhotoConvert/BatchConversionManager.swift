@@ -7,7 +7,9 @@ class BatchConversionManager: ObservableObject {
     private init() {}
     
     private let albumName = "MoLive 转换"
-    private let maxConcurrentTasks = 3 // 限制并发数为 3
+    // 长时间批处理中，3 路视频编码会竞争 VideoToolbox 和内存带宽，
+    // 更容易触发热降频。2 路并发优先保证千张级任务的持续吞吐。
+    private let maxConcurrentTasks = 2
     
     func fetchLivePhotos(after date: Date? = nil, state: ConversionState) {
         let options = PHFetchOptions()
@@ -125,9 +127,7 @@ class BatchConversionManager: ObservableObject {
         var tempDirToCleanup: URL?
         do {
             try Task.checkCancellation()
-            let livePhoto = try await self.requestLivePhoto(for: asset)
-            try Task.checkCancellation()
-            let url = try await Converter.shared.convertLivePhotoToMotionJPEG(from: livePhoto)
+            let url = try await Converter.shared.convertLivePhotoToMotionJPEG(from: asset)
             // 记录临时目录路径，以便后续清理
             tempDirToCleanup = url.deletingLastPathComponent()
             
@@ -190,29 +190,6 @@ class BatchConversionManager: ObservableObject {
                     }
                 } else {
                     continuation.resume(throwing: error ?? ConversionError.conversionFailed)
-                }
-            }
-        }
-    }
-    
-    private func requestLivePhoto(for asset: PHAsset) async throws -> PHLivePhoto {
-        try await withCheckedThrowingContinuation { continuation in
-            let options = PHLivePhotoRequestOptions()
-            options.isNetworkAccessAllowed = true
-            options.deliveryMode = .highQualityFormat
-            
-            PHImageManager.default().requestLivePhoto(for: asset, targetSize: PHImageManagerMaximumSize, contentMode: .aspectFit, options: options) { livePhoto, info in
-                if let isDegraded = info?[PHImageResultIsDegradedKey] as? Bool, isDegraded {
-                    return
-                }
-                if let error = info?[PHImageErrorKey] as? Error {
-                    continuation.resume(throwing: error)
-                } else if let livePhoto = livePhoto {
-                    continuation.resume(returning: livePhoto)
-                } else if let cancelled = info?[PHImageCancelledKey] as? Bool, cancelled {
-                    continuation.resume(throwing: CancellationError())
-                } else {
-                    continuation.resume(throwing: ConversionError.invalidInput)
                 }
             }
         }

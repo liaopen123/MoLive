@@ -127,4 +127,17 @@ struct MotionJPEGConvertTests {
         ])
     }
 
+    @Test func removingMetadataDoesNotReencodeJPEGBody() throws {
+        let exifPayload = Data("Exif\0\0metadata".utf8)
+        var jpeg = Data([0xFF, 0xD8, 0xFF, 0xE1])
+        let length = UInt16(exifPayload.count + 2)
+        jpeg.append(contentsOf: [UInt8(length >> 8), UInt8(length & 0xFF)])
+        jpeg.append(exifPayload)
+        let scanAndBody = Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+        jpeg.append(scanAndBody)
+
+        let stripped = try Converter.removingExistingExifAndXMP(from: jpeg)
+        #expect(stripped == Data([0xFF, 0xD8]) + scanAndBody)
+    }
+
 }
